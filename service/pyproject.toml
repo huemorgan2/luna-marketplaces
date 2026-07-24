@@ -1,6 +1,6 @@
 [project]
 name = "luna-marketplaces-service"
-version = "0.1.0"
+version = "0.2.0"
 description = "Luna Marketplaces — the service for creating and operating plugin marketplaces"
 requires-python = ">=3.12"
 license = "MIT"

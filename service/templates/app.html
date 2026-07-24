@@ -334,6 +334,38 @@
                             <pre class="input" id="mp-luna-config" style="white-space:pre; font-family:monospace; font-size:0.75rem; padding:1rem; line-height:1.6;"></pre>
                         </div>
                     </div>
+                    <div class="card" id="publish-token-card" style="display:none; margin-top:1rem;">
+                        <h3 style="font-size:1rem; margin-bottom:0.25rem;">Publish Token</h3>
+                        <p style="font-size:0.8rem; color:var(--text-muted); margin-bottom:1rem;">
+                            A long-lived credential for publishing plugins to this marketplace from
+                            scripts and CI — use it as <code>LUNA_MP_TOKEN</code> or an
+                            <code>Authorization: Bearer</code> header. Scoped to this marketplace only.
+                        </p>
+                        <div id="publish-token-none" style="display:none;">
+                            <button class="btn btn-primary btn-sm" onclick="generatePublishToken()">Generate publish token</button>
+                        </div>
+                        <div id="publish-token-existing" style="display:none;">
+                            <div style="font-size:0.85rem; margin-bottom:0.75rem;">
+                                Active token <code id="publish-token-prefix" style="font-family:monospace;"></code>&hellip;
+                                <span id="publish-token-created" style="color:var(--text-muted);"></span>
+                            </div>
+                            <button class="btn btn-secondary btn-sm" onclick="generatePublishToken()">Regenerate</button>
+                            <button class="btn btn-secondary btn-sm" onclick="revokePublishToken()">Revoke</button>
+                        </div>
+                        <div id="publish-token-reveal" style="display:none; margin-top:1rem;">
+                            <div style="font-size:0.8rem; color:#e0a020; margin-bottom:0.5rem;">
+                                ⚠️ Shown once — copy and store it now. Regenerating invalidates the old token.
+                            </div>
+                            <div style="display:flex; gap:0.5rem;">
+                                <input class="input" id="publish-token-value" readonly style="font-family:monospace; font-size:0.8rem; flex:1;">
+                                <button class="btn btn-secondary btn-sm" onclick="copyPublishToken()" id="publish-token-copy-btn">Copy</button>
+                            </div>
+                            <div class="input-group" style="margin-top:0.75rem;">
+                                <label>Usage</label>
+                                <pre class="input" id="publish-token-usage" style="white-space:pre; font-family:monospace; font-size:0.72rem; padding:1rem; line-height:1.6; overflow-x:auto;"></pre>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -588,6 +620,7 @@
             document.getElementById('access-token-group').style.display = 'none';
         }
         document.getElementById('mp-luna-config').textContent = `[[marketplaces]]\nid = "${currentMp.slug}"\nurl = "https://${currentMp.slug}.marketplaces.com.ai"\npinned_key = "ed25519:${currentMp.signing_key_public || '...'}"`;
+        loadPublishToken(canEdit);
 
         // Load official catalog for "add from catalog"
         renderAddFromCatalog();
@@ -653,6 +686,62 @@
         const res = await fetch(`/api/marketplaces/${currentMp.slug}/upload`, {method:'POST', headers:{'Authorization':`Bearer ${token}`}, body: formData});
         if (res.ok) { const r = await res.json(); alert(`Uploaded ${r.plugin} ${r.version}!`); openMarketplace(currentMp.id); showMpTab('plugins'); }
         else { const e = await res.json().catch(()=>({detail:'Upload failed'})); alert(e.detail || 'Upload failed'); }
+    }
+
+    // PUBLISH TOKEN
+    async function loadPublishToken(canEdit) {
+        const card = document.getElementById('publish-token-card');
+        document.getElementById('publish-token-reveal').style.display = 'none';
+        if (!canEdit) { card.style.display = 'none'; return; }
+        card.style.display = 'block';
+        const info = await api('GET', `/api/marketplaces/${currentMp.slug}/publish-token`);
+        renderPublishTokenInfo(info);
+    }
+
+    function renderPublishTokenInfo(info) {
+        const has = info && info.exists;
+        document.getElementById('publish-token-none').style.display = has ? 'none' : 'block';
+        document.getElementById('publish-token-existing').style.display = has ? 'block' : 'none';
+        if (has) {
+            document.getElementById('publish-token-prefix').textContent = info.token_prefix || '';
+            document.getElementById('publish-token-created').textContent =
+                'created ' + fmtDate(info.created_at) +
+                (info.last_used_at ? ' · last used ' + fmtDate(info.last_used_at) : ' · never used');
+        }
+    }
+
+    async function generatePublishToken() {
+        const res = await fetch(`/api/marketplaces/${currentMp.slug}/publish-token`, {
+            method: 'POST', headers: {'Authorization': `Bearer ${token}`}
+        });
+        if (!res.ok) { const e = await res.json().catch(()=>({})); alert(e.detail || 'Failed to generate token'); return; }
+        const data = await res.json();
+        renderPublishTokenInfo({exists: true, token_prefix: data.token_prefix, created_at: data.created_at});
+        document.getElementById('publish-token-value').value = data.token;
+        document.getElementById('publish-token-usage').textContent =
+`# publish_plugin.sh / CI
+export LUNA_MP_TOKEN=${data.token}
+
+# or raw API
+curl -X POST ${window.location.origin}/api/marketplaces/${currentMp.slug}/upload \\
+  -H "Authorization: Bearer ${data.token}" \\
+  -F "artifact=@my-plugin.zip"`;
+        document.getElementById('publish-token-reveal').style.display = 'block';
+        document.getElementById('publish-token-copy-btn').textContent = 'Copy';
+    }
+
+    async function revokePublishToken() {
+        if (!confirm('Revoke the publish token for this marketplace? Scripts using it will stop working.')) return;
+        await api('DELETE', `/api/marketplaces/${currentMp.slug}/publish-token`);
+        document.getElementById('publish-token-reveal').style.display = 'none';
+        renderPublishTokenInfo({exists: false});
+    }
+
+    async function copyPublishToken() {
+        const val = document.getElementById('publish-token-value').value;
+        try { await navigator.clipboard.writeText(val); }
+        catch (e) { document.getElementById('publish-token-value').select(); document.execCommand('copy'); }
+        document.getElementById('publish-token-copy-btn').textContent = 'Copied ✓';
     }
 
     // TABS

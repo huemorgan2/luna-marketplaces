@@ -28,6 +28,23 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
 
 
+class PublishTokenInfo(BaseModel):
+    """Metadata about the caller's active publish token — never the secret."""
+
+    exists: bool
+    token_prefix: str | None = None
+    created_at: int | None = None
+    last_used_at: int | None = None
+
+
+class PublishTokenCreated(BaseModel):
+    """The full secret, returned exactly once at creation."""
+
+    token: str
+    token_prefix: str
+    created_at: int
+
+
 class OrgCreate(BaseModel):
     name: str
     slug: str

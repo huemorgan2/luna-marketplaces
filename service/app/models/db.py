@@ -79,6 +79,28 @@ class Marketplace(Base):
     plugins = relationship("Plugin", back_populates="marketplace")
 
 
+class PublishToken(Base):
+    """Long-lived publish credential, scoped to one (user, marketplace).
+
+    The secret (`lmp_` + urlsafe random) is shown once at creation; only its
+    sha256 is stored. Presented as `Authorization: Bearer lmp_...` on the
+    publish/manage APIs.
+    """
+    __tablename__ = "publish_tokens"
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    marketplace_id = Column(String, ForeignKey("marketplaces.id"), nullable=False, index=True)
+    token_hash = Column(String, nullable=False, index=True)
+    token_prefix = Column(String, nullable=False)
+    created_at = Column(Integer, default=now_ts)
+    last_used_at = Column(Integer, nullable=True)
+    revoked = Column(Boolean, default=False)
+
+    user = relationship("User")
+    marketplace = relationship("Marketplace")
+
+
 class Plugin(Base):
     __tablename__ = "plugins"
 

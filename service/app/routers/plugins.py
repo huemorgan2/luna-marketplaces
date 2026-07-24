@@ -480,6 +480,12 @@ async def _get_marketplace_for_publisher(mp_slug: str, user: User, db: AsyncSess
     if not mp:
         raise HTTPException(404, "Marketplace not found")
 
+    # Requests authenticated with a publish token are scoped to exactly the
+    # marketplace the token was issued for, regardless of the user's roles.
+    token_mp_id = getattr(user, "_publish_token_mp_id", None)
+    if token_mp_id is not None and token_mp_id != mp.id:
+        raise HTTPException(403, "Publish token is not valid for this marketplace")
+
     # Global editors (allow list) may publish to any catalog, including `official`
     # which has no real account behind it.
     if is_global_editor(user):

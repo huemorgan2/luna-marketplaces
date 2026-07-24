@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .database import get_db
-from .models.db import User
+from .models.db import PublishToken, User
 
 import os
 
@@ -67,12 +67,58 @@ def create_access_token(user_id: str) -> str:
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
+# Publish tokens: long-lived credentials issued from the UI, scoped to one
+# marketplace. Distinguished from session JWTs by this prefix.
+PUBLISH_TOKEN_PREFIX = "lmp_"
+
+
+def hash_publish_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def new_publish_token() -> str:
+    import secrets
+
+    return PUBLISH_TOKEN_PREFIX + secrets.token_urlsafe(32)
+
+
+async def _resolve_publish_token(token: str, db: AsyncSession) -> User:
+    """Resolve a `lmp_` bearer to its owning user.
+
+    The token's marketplace scope is attached to the returned user object as
+    `_publish_token_mp_id`, enforced by the publisher gate. Session JWTs never
+    set the attribute, so they keep full account access.
+    """
+    result = await db.execute(
+        select(PublishToken).where(
+            PublishToken.token_hash == hash_publish_token(token),
+            PublishToken.revoked == False,  # noqa: E712
+        )
+    )
+    pt = result.scalar_one_or_none()
+    if not pt:
+        raise HTTPException(status_code=401, detail="Invalid or revoked publish token")
+
+    user = await db.get(User, pt.user_id)
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    pt.last_used_at = int(time.time())
+    await db.commit()
+
+    user._publish_token_mp_id = pt.marketplace_id  # type: ignore[attr-defined]
+    return user
+
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
     db: AsyncSession = Depends(get_db),
 ) -> User:
     if not credentials:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    if credentials.credentials.startswith(PUBLISH_TOKEN_PREFIX):
+        return await _resolve_publish_token(credentials.credentials, db)
 
     try:
         payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])

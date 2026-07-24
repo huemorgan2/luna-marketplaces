@@ -46,7 +46,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Luna Marketplaces",
     description="Plugin marketplace service for the Luna agent platform",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -102,4 +102,4 @@ async def dev_kit():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "luna-marketplaces", "version": "0.1.0"}
+    return {"status": "ok", "service": "luna-marketplaces", "version": "0.2.0"}

@@ -22,11 +22,13 @@ from ..auth import (
     get_current_user,
     google_oauth_configured,
     hash_password,
+    hash_publish_token,
     is_global_editor,
+    new_publish_token,
     verify_password,
 )
 from ..database import get_db
-from ..models.db import Marketplace, Org, OrgMember, Plugin, User, UsageEvent, now_ts
+from ..models.db import Marketplace, Org, OrgMember, Plugin, PublishToken, User, UsageEvent, now_ts
 from ..models.schemas import (
     LoginRequest,
     MarketplaceCreate,
@@ -34,6 +36,8 @@ from ..models.schemas import (
     MyMarketplaceResponse,
     OrgCreate,
     OrgResponse,
+    PublishTokenCreated,
+    PublishTokenInfo,
     TokenResponse,
     UserCreate,
     UserResponse,
@@ -371,6 +375,124 @@ async def my_marketplaces(
             items.append(_build(official, org, "shared", "admin", True, await _plugin_count(official.id)))
 
     return items
+
+
+# ---------------------------------------------------------------------------
+# Publish tokens — long-lived credentials for the publish/manage APIs
+# ---------------------------------------------------------------------------
+
+
+async def _marketplace_for_token_management(
+    mp_slug: str, user: User, db: AsyncSession
+) -> Marketplace:
+    """The marketplace, if the caller may manage publish tokens for it.
+
+    Same authorization as publishing (org owner/publisher or global editor),
+    with one extra rule: a publish token cannot mint publish tokens — only a
+    logged-in session can.
+    """
+    if getattr(user, "_publish_token_mp_id", None) is not None:
+        raise HTTPException(403, "Publish tokens cannot manage publish tokens — log in instead")
+
+    result = await db.execute(select(Marketplace).where(Marketplace.slug == mp_slug))
+    mp = result.scalar_one_or_none()
+    if not mp:
+        raise HTTPException(404, "Marketplace not found")
+
+    if is_global_editor(user):
+        return mp
+
+    membership = await db.execute(
+        select(OrgMember).where(OrgMember.org_id == mp.org_id, OrgMember.user_id == user.id)
+    )
+    member = membership.scalar_one_or_none()
+    if not member or member.role not in ("owner", "publisher"):
+        raise HTTPException(403, "Must be owner or publisher to manage publish tokens")
+    return mp
+
+
+@router.get("/marketplaces/{mp_slug}/publish-token", response_model=PublishTokenInfo)
+async def get_publish_token_info(
+    mp_slug: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    mp = await _marketplace_for_token_management(mp_slug, user, db)
+    result = await db.execute(
+        select(PublishToken).where(
+            PublishToken.user_id == user.id,
+            PublishToken.marketplace_id == mp.id,
+            PublishToken.revoked == False,  # noqa: E712
+        )
+    )
+    pt = result.scalars().first()
+    if not pt:
+        return PublishTokenInfo(exists=False)
+    return PublishTokenInfo(
+        exists=True,
+        token_prefix=pt.token_prefix,
+        created_at=pt.created_at,
+        last_used_at=pt.last_used_at,
+    )
+
+
+@router.post("/marketplaces/{mp_slug}/publish-token", response_model=PublishTokenCreated)
+async def create_publish_token(
+    mp_slug: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create (or regenerate) the caller's publish token for this marketplace.
+
+    Any previous token for the same (user, marketplace) is revoked. The full
+    secret is returned only from this call.
+    """
+    mp = await _marketplace_for_token_management(mp_slug, user, db)
+
+    existing = await db.execute(
+        select(PublishToken).where(
+            PublishToken.user_id == user.id,
+            PublishToken.marketplace_id == mp.id,
+            PublishToken.revoked == False,  # noqa: E712
+        )
+    )
+    for old in existing.scalars():
+        old.revoked = True
+
+    secret = new_publish_token()
+    pt = PublishToken(
+        id=str(uuid.uuid4()),
+        user_id=user.id,
+        marketplace_id=mp.id,
+        token_hash=hash_publish_token(secret),
+        token_prefix=secret[:12],
+        created_at=now_ts(),
+    )
+    db.add(pt)
+    await db.commit()
+    return PublishTokenCreated(token=secret, token_prefix=pt.token_prefix, created_at=pt.created_at)
+
+
+@router.delete("/marketplaces/{mp_slug}/publish-token")
+async def revoke_publish_token(
+    mp_slug: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    mp = await _marketplace_for_token_management(mp_slug, user, db)
+    result = await db.execute(
+        select(PublishToken).where(
+            PublishToken.user_id == user.id,
+            PublishToken.marketplace_id == mp.id,
+            PublishToken.revoked == False,  # noqa: E712
+        )
+    )
+    revoked = 0
+    for pt in result.scalars():
+        pt.revoked = True
+        revoked += 1
+    await db.commit()
+    return {"status": "revoked", "count": revoked}
 
 
 async def _get_org_for_user(
