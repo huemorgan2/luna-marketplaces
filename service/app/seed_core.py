@@ -51,31 +51,31 @@ CORE_USER_EMAIL = "core@luna-marketplaces.local"
 OFFICIAL_CURATION: dict = {
     "heroes": [
         {
-            "plugin": "plugin-playbooks",
-            "kicker": "Featured",
-            "title": "Teach your agent a routine",
-            "sub": "Propose, validate and run repeatable playbooks — with the autonomy you choose.",
+            "plugin": "personality-template",
+            "kicker": "Only on Luna",
+            "title": "Give your agent a soul",
+            "sub": "Iconic fictional personalities, one click away.",
         },
         {
-            "plugin": "plugin-web-access",
-            "kicker": "Essential",
-            "title": "The web, in reach",
-            "sub": "Search, fetch and call APIs without leaving chat.",
+            "plugin": "plugin-image-gen",
+            "kicker": "Plugins we love",
+            "title": "Create images mid-conversation",
+            "sub": "Nano Banana Pro, GPT Image and FLUX, inline in chat.",
         },
     ],
-    "essentials": ["plugin-web-access", "plugin-files", "plugin-recall"],
+    "essentials": ["plugin-web-access", "plugin-files", "plugin-playbooks"],
     "features": [
         {
-            "plugin": "plugin-mcp",
-            "kicker": "Connectivity",
-            "title": "Every MCP server, one plugin",
-            "sub": "Connect Model Context Protocol servers and use their tools natively.",
+            "plugin": "plugin-giphy",
+            "kicker": "Plugins we love",
+            "title": "The right GIF, right on time",
+            "sub": "GIPHY search and inline reactions in the chat.",
         },
         {
-            "plugin": "plugin-charts",
-            "kicker": "Ability",
-            "title": "Numbers, drawn",
-            "sub": "Render charts straight into the conversation.",
+            "plugin": "plugin-browser",
+            "kicker": "New this month",
+            "title": "A real browser for your agent",
+            "sub": "Navigate, read pages and capture screenshots — stealth included.",
         },
     ],
 }
