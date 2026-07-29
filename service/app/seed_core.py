@@ -272,11 +272,38 @@ async def _upsert_plugin(db: AsyncSession, mp: Marketplace, manifest: dict, sha2
     return f"seeded {name} {version} sha256={sha256[:12]}"
 
 
+# Marks media rows owned by _seed_default_media so they can be re-synced when
+# the repo art changes without ever touching publisher uploads.
+_DEFAULT_MEDIA_CAPTION = "__default__"
+
+# sha256 of default files seeded before the ownership marker existed; rows
+# matching these are treated as owned. Removable once prod has re-seeded.
+_LEGACY_DEFAULT_SHAS = {
+    "1a680263e6e2b8ea610ad20e9453074aa6df8d2d3e5f5b276ea477f4284f4459",  # luna-macrunner/icon.svg
+    "b86280c4fc06a9516896b5fb7603ca275a98d15898d68ecc836fc792cd788f93",  # personality-template/cover.png
+    "7ea073f31706b4f6edcb2307bb158fbd279111cbbcf5895a7f1c47efa2319d2b",  # personality-template/icon.png
+    "a9a6b8af2aaae247670a2a55bafb6e9bafc86c63d21ba8a31659ab781ca085bf",  # plugin-browser/cover.png
+    "6e93fbb7e0d8b12f20d980495fa7fbd03a3fea572d6a2b2a340c7925db43d517",  # plugin-browser/icon.png
+    "5eb3e563937f3754f75502ee3684a7c5db9afd1e8b3330b76c478bae87fb6724",  # plugin-curiosity/icon.svg
+    "4ed38473deb560ddec25d1882e6ee972979d9683a850d31c2a075ec3d2a2a6af",  # plugin-feedback/icon.png
+    "a41a547ec653587cb23fdf91fb0bc8748da33779b9de093023501cc64817bd8f",  # plugin-giphy/cover.png
+    "b65764fb2dcec50125342b09766890d6ebeed7b4891e34e9357745466263ee0c",  # plugin-giphy/icon.png
+    "da6abc3a2086d867911a6f45cdd7a0a750ff8c746c92ba9f1602e2c917efca2f",  # plugin-html-page/icon.png
+    "c1552b72ecce50f123bbfcb78ad7ff815b91b08da12de2f30c2711d9163d3e33",  # plugin-image-gen/cover.png
+    "976d30175560b91d3aa5079f9e0e4868f92852b4b5b38fe9a96535cf07d598ef",  # plugin-image-gen/icon.png
+    "6f202444a3f3619b3625b158b9816b996176ea525efe4f644d3914397076a529",  # plugin-linear-ascent/icon.svg
+    "c0988b39f3039cbdf0ebf9116bc0942f6a736fc0ac2119ee34c4efe2ba823061",  # plugin-scheduler/icon.svg
+    "81eced722f5efbf1e3ded33cbc96214356cdb96bb947830510ceed0d6174ba85",  # plugin-socialkit/icon.png
+    "bd9a76a7977aeb17ddc0bf7bced6792c6c6631bff61ca5e731ffb946ce2d1ac4",  # plugin-whatsapp/icon.png
+    "0ee3f2ff7825e47f5ff3642b3a388cf06d4216b1fe2a1d413872188e75bbae80",  # plugin-wiki/icon.svg
+}
+
+
 async def _seed_default_media(db: AsyncSession, mp: Marketplace, src: Path) -> list[str]:
     """Default art for plugins NOT seeded from marketplace-src (published
     externally). `marketplace-src/_default_media/<plugin-name>/{icon,cover}.*`
-    applies only when the plugin exists and has no media at all, so publisher
-    uploads are never overwritten."""
+    applies when the plugin has no media, and re-syncs rows this seeder owns
+    (caption marker); anything a publisher uploaded is never touched."""
     root = src / "_default_media"
     if not root.is_dir():
         return []
@@ -292,28 +319,45 @@ async def _seed_default_media(db: AsyncSession, mp: Marketplace, src: Path) -> l
         existing = (
             await db.execute(select(PluginMedia).where(PluginMedia.plugin_id == plugin.id))
         ).scalars().all()
-        if existing:
+        owned = all(
+            m.caption == _DEFAULT_MEDIA_CAPTION or m.sha256 in _LEGACY_DEFAULT_SHAS
+            for m in existing
+        )
+        if not owned:
             continue
+
         files = sorted(
             p for p in d.iterdir() if p.is_file() and p.suffix.lower() in _MEDIA_TYPES
         )
-        for i, f in enumerate(files):
+        desired: list[tuple[str, str, str, bytes]] = []  # (kind, sha, content_type, bytes)
+        for f in files:
             data = f.read_bytes()
             sha = hashlib.sha256(data).hexdigest()
             stem = f.stem.lower()
             kind = "icon" if stem == "icon" else "cover" if stem == "cover" else "screenshot"
+            desired.append((kind, sha, _MEDIA_TYPES[f.suffix.lower()], data))
+
+        if {(m.kind, m.sha256) for m in existing} == {(k, s) for k, s, _, _ in desired}:
+            for _, sha, _, data in desired:
+                if not storage.exists(sha, ext=".bin"):
+                    storage.store(sha, data, ext=".bin")
+            continue
+
+        for m in existing:
+            await db.delete(m)
+        for i, (kind, sha, ctype, data) in enumerate(desired):
             storage.store(sha, data, ext=".bin")
             db.add(PluginMedia(
                 id=str(uuid.uuid4()),
                 plugin_id=plugin.id,
                 kind=kind,
                 sha256=sha,
-                content_type=_MEDIA_TYPES[f.suffix.lower()],
-                caption="",
+                content_type=ctype,
+                caption=_DEFAULT_MEDIA_CAPTION,
                 sort_order=i,
             ))
-        if files:
-            log.append(f"default media for {d.name}: {len(files)} file(s)")
+        if desired:
+            log.append(f"default media for {d.name}: {len(desired)} file(s)")
     return log
 
 
