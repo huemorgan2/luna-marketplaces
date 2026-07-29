@@ -1,189 +1,458 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Plugin Details — Luna Marketplace</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        :root {
-            --bg: #0f0f13; --surface: #1a1a22; --surface-hover: #22222e;
-            --border: #2a2a36; --text: #e8e8ed; --text-muted: #8b8b9e;
-            --accent: #7c6cf0; --accent-glow: rgba(124, 108, 240, 0.15);
-            --green: #4ade80; --amber: #fbbf24; --red: #f87171; --blue: #60a5fa;
-            --radius: 12px;
-        }
-        body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
-        .header {
-            background: var(--surface); border-bottom: 1px solid var(--border);
-            padding: 1.5rem 2rem; position: sticky; top: 0; z-index: 100;
-        }
-        .header-inner { max-width: 1000px; margin: 0 auto; display: flex; align-items: center; gap: 1rem; }
-        .back-link { color: var(--text-muted); text-decoration: none; font-size: 0.9rem; }
-        .back-link:hover { color: var(--accent); }
-        .logo { font-size: 1.1rem; font-weight: 700; display: flex; align-items: center; gap: 0.5rem; }
-        .logo-icon { width: 28px; height: 28px; background: linear-gradient(135deg, var(--accent), #a78bfa); border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 14px; }
-        .main { max-width: 1000px; margin: 0 auto; padding: 2rem; }
-        .plugin-header { display: flex; align-items: flex-start; gap: 1.5rem; margin-bottom: 2rem; }
-        .plugin-icon { width: 72px; height: 72px; border-radius: 14px; background: linear-gradient(135deg, var(--accent), #a78bfa); display: flex; align-items: center; justify-content: center; font-size: 32px; flex-shrink: 0; }
-        .plugin-title { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.25rem; }
-        .plugin-namespace { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.5rem; }
-        .plugin-version { display: inline-block; font-size: 0.75rem; color: var(--accent); background: var(--accent-glow); padding: 0.2rem 0.6rem; border-radius: 4px; font-weight: 500; }
-        .plugin-description { color: var(--text-muted); font-size: 1rem; line-height: 1.6; margin-bottom: 2rem; }
-        .section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; margin-bottom: 1.5rem; }
-        .section-title { font-size: 0.9rem; font-weight: 600; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem; }
-        .tags { display: flex; flex-wrap: wrap; gap: 0.5rem; }
-        .tag { font-size: 0.75rem; padding: 0.3rem 0.7rem; background: rgba(255,255,255,0.05); border-radius: 4px; color: var(--text-muted); }
-        .requirements-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1rem; }
-        .req-item { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem; background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid var(--border); }
-        .req-icon { font-size: 1.2rem; }
-        .req-label { font-size: 0.8rem; color: var(--text-muted); }
-        .req-value { font-size: 0.85rem; font-weight: 500; }
-        .tools-list { display: flex; flex-direction: column; gap: 0.75rem; }
-        .tool-item { display: flex; align-items: center; justify-content: space-between; padding: 0.75rem 1rem; background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid var(--border); }
-        .tool-name { font-family: monospace; font-size: 0.85rem; color: var(--blue); }
-        .tool-policy { font-size: 0.7rem; padding: 0.2rem 0.5rem; border-radius: 3px; }
-        .tool-policy.auto_approve { background: rgba(74,222,128,0.1); color: var(--green); }
-        .tool-policy.prompt_always { background: rgba(248,113,113,0.1); color: var(--red); }
-        .tool-policy.prompt_first_time_only { background: rgba(251,191,36,0.1); color: var(--amber); }
-        .readme { line-height: 1.7; color: var(--text-muted); }
-        .readme h1, .readme h2, .readme h3 { color: var(--text); margin: 1rem 0 0.5rem; }
-        .readme code { background: rgba(255,255,255,0.05); padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.85em; }
-        .readme pre { background: rgba(0,0,0,0.3); padding: 1rem; border-radius: 8px; overflow-x: auto; margin: 1rem 0; }
-        .install-cmd { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; font-family: monospace; font-size: 0.85rem; color: var(--green); display: flex; align-items: center; justify-content: space-between; margin-bottom: 2rem; }
-        .versions-table { width: 100%; border-collapse: collapse; }
-        .versions-table th { text-align: left; font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; padding: 0.5rem 0; border-bottom: 1px solid var(--border); }
-        .versions-table td { padding: 0.6rem 0; font-size: 0.85rem; border-bottom: 1px solid rgba(255,255,255,0.03); }
-        .versions-table .ver { color: var(--accent); font-weight: 500; }
-        .stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 2rem; }
-        .stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem; text-align: center; }
-        .stat-num { font-size: 1.5rem; font-weight: 700; color: var(--accent); }
-        .stat-label { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=720">
+<title>Luna-Marketplace</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --text:#f4f4f5; --muted:#a1a1aa; --dim:#71717a;
+    --luna-300:#c4b5fd; --luna-400:#a78bfa; --luna-500:#8b5cf6; --luna-600:#7c3aed;
+    --hairline:rgba(255,255,255,.07); --hairline2:rgba(255,255,255,.12);
+    --glass:rgba(255,255,255,.04); --star:#f5a623;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    min-height:100vh;
+    background:
+      radial-gradient(1200px 600px at 10% -10%, rgba(139,92,246,.16), transparent 60%),
+      radial-gradient(800px 400px at 100% 0%, rgba(124,58,237,.10), transparent 60%),
+      #0a0a0f;
+    background-attachment:fixed;
+    color:var(--text);
+    font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,sans-serif;
+    font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--luna-400);text-decoration:none}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.07);border-radius:999px}
+  .wrap{max-width:1100px;margin:0 auto;padding:0 28px}
+
+  header{position:sticky;top:0;z-index:10;background:rgba(10,10,15,.75);backdrop-filter:blur(12px);border-bottom:1px solid var(--hairline)}
+  .hbar{display:flex;align-items:center;gap:18px;height:58px}
+  .logo{font-weight:700;font-size:17px;cursor:pointer;letter-spacing:-.01em;white-space:nowrap}
+  .luna-text{background:linear-gradient(120deg,#c4b5fd 0%,#f0abfc 50%,#fda4af 100%);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .logo .mp{color:var(--muted);font-weight:500}
+  .signin{font-size:13.5px;color:var(--muted);white-space:nowrap;margin-left:auto}
+  .signin:hover{color:var(--luna-300)}
+
+  main{padding:28px 0 70px}
+  .crumb{font-size:13.5px;color:var(--muted);cursor:pointer;margin-bottom:22px;display:inline-block}
+  .crumb:hover{color:var(--text)}
+
+  .dhead{display:flex;gap:24px;align-items:flex-start}
+  .dhead .ic{width:120px;height:120px;border-radius:26px;overflow:hidden;flex-shrink:0;border:1px solid var(--hairline)}
+  .dhead .ic img{width:100%;height:100%;object-fit:cover;display:block}
+  .lettertile{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-weight:800;color:rgba(255,255,255,.85)}
+  .dhead h1{font-size:28px;font-weight:800;letter-spacing:-.02em;line-height:1.15}
+  .dhead .sub{color:var(--muted);font-size:15px;margin-top:3px}
+  .dhead .metaline{display:flex;align-items:center;gap:14px;margin-top:9px;font-size:13.5px;color:var(--dim);flex-wrap:wrap}
+  .stars{color:var(--star);letter-spacing:1.5px;font-size:14px}
+  .dhead .actions{display:flex;align-items:center;gap:12px;margin-top:16px}
+  .get{background:var(--luna-600);color:#fff;border:none;border-radius:999px;padding:9px 30px;font-size:14.5px;font-weight:700;cursor:pointer;font-family:inherit}
+  .get:hover{background:var(--luna-500)}
+  .installed{display:inline-flex;align-items:center;gap:7px;color:var(--muted);font-size:14px;font-weight:600;padding:9px 18px;border:1px solid var(--hairline2);border-radius:999px}
+  .installed svg{width:14px;height:14px;stroke:#34d399}
+  .gear{display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid var(--hairline);cursor:pointer;color:var(--muted)}
+  .gear:hover{color:var(--luna-300);border-color:rgba(139,92,246,.45)}
+  .gear svg{width:17px;height:17px}
+  .copyline{font-size:13px;color:var(--dim);margin-top:12px}
+  .copyline code{background:var(--glass);border:1px solid var(--hairline);border-radius:6px;padding:2px 8px;font-size:12.5px;cursor:pointer}
+  .copyline code:hover{border-color:rgba(139,92,246,.45);color:var(--luna-300)}
+
+  .shots{display:flex;gap:14px;overflow-x:auto;padding:6px 2px 12px;margin-top:34px;scroll-snap-type:x mandatory}
+  .shots img,.shots video{height:300px;border-radius:14px;border:1px solid var(--hairline);scroll-snap-align:start;flex-shrink:0;max-width:none}
+
+  .sect{margin-top:40px;padding-top:28px;border-top:1px solid var(--hairline)}
+  .sect h2{font-size:20px;font-weight:800;letter-spacing:-.02em;margin-bottom:14px}
+  .prose{color:#d4d4d8;font-size:14.5px;white-space:pre-wrap;overflow-wrap:break-word}
+  .prose .h{font-weight:700;color:var(--text);display:block;margin:14px 0 4px;font-size:15.5px}
+
+  .access{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+  .acc{background:var(--glass);border:1px solid var(--hairline);border-radius:12px;padding:13px 16px}
+  .acc .k{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;font-weight:700}
+  .acc .v{font-size:14px;margin-top:4px}
+  .pill{display:inline-block;background:rgba(255,255,255,.07);border-radius:999px;padding:2px 10px;font-size:12.5px;margin:3px 4px 0 0;color:var(--muted)}
+  .pill.warn{color:#fbbf24;background:rgba(251,191,36,.1)}
+
+  .ratrow{display:flex;gap:44px;align-items:flex-start;flex-wrap:wrap}
+  .ratbig{text-align:center}
+  .ratbig .n{font-size:52px;font-weight:800;line-height:1}
+  .ratbig .of{color:var(--dim);font-size:13px;margin-top:2px}
+  .histo{flex:1;min-width:260px;max-width:420px}
+  .hrow{display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--dim);margin-bottom:5px}
+  .hbarr{flex:1;height:7px;background:rgba(255,255,255,.06);border-radius:999px;overflow:hidden}
+  .hbarr i{display:block;height:100%;background:var(--star);border-radius:999px}
+  .writebox{margin-top:26px;background:var(--glass);border:1px solid var(--hairline);border-radius:14px;padding:20px}
+  .writebox h3{font-size:15.5px;font-weight:700;margin-bottom:12px}
+  .starpick{display:flex;gap:6px;font-size:26px;cursor:pointer;margin-bottom:12px}
+  .starpick span{color:rgba(255,255,255,.18)}
+  .starpick span.on{color:var(--star)}
+  .writebox input,.writebox textarea{width:100%;background:rgba(0,0,0,.25);border:1px solid var(--hairline);border-radius:9px;color:var(--text);padding:9px 12px;font-size:14px;font-family:inherit;outline:none;margin-bottom:10px}
+  .writebox textarea{min-height:90px;resize:vertical}
+  .writebox input:focus,.writebox textarea:focus{border-color:rgba(139,92,246,.5)}
+  .btn{background:var(--luna-600);color:#fff;border:none;border-radius:999px;padding:8px 24px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit}
+  .btn:hover{background:var(--luna-500)}
+  .notice{font-size:13.5px;color:var(--muted);background:var(--glass);border:1px solid var(--hairline);border-radius:10px;padding:12px 16px;margin-top:20px}
+  .err{color:#f87171;font-size:13px;margin-top:6px}
+
+  .review{padding:20px 0;border-bottom:1px solid var(--hairline)}
+  .review .rh{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .review .rt{font-weight:700;font-size:14.5px}
+  .review .ra{color:var(--dim);font-size:12.5px}
+  .review .rb{color:#d4d4d8;font-size:14px;margin-top:7px;white-space:pre-wrap;overflow-wrap:break-word}
+  .review .rf{display:flex;gap:16px;margin-top:10px;font-size:12.5px;color:var(--dim)}
+  .review .rf a{cursor:pointer;color:var(--dim)}
+  .review .rf a:hover{color:var(--luna-300)}
+  .review .rf a.on{color:var(--luna-400)}
+  .presp{margin-top:12px;margin-left:16px;border-left:2px solid rgba(139,92,246,.4);padding:6px 0 6px 14px}
+  .presp .ph{font-size:12.5px;font-weight:700;color:var(--luna-300)}
+  .presp .pb{font-size:13.5px;color:var(--muted);margin-top:3px;white-space:pre-wrap}
+  .sortsel{background:var(--glass);border:1px solid var(--hairline);border-radius:8px;color:var(--muted);padding:5px 10px;font-size:13px;font-family:inherit;outline:none}
+
+  .info{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:4px 40px}
+  .inforow{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-bottom:1px solid var(--hairline);font-size:13.5px}
+  .inforow .k{color:var(--dim)}
+  .inforow .v{text-align:right;overflow-wrap:anywhere}
+  .verlist{margin-top:8px}
+  .verrow{display:flex;gap:14px;padding:8px 0;border-bottom:1px solid var(--hairline);font-size:13.5px}
+  .verrow .yanked{color:#f87171;font-size:12px}
+
+  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  .card{background:var(--glass);border:1px solid var(--hairline);border-radius:16px;padding:16px;cursor:pointer;display:flex;flex-direction:column;gap:12px}
+  .card:hover{border-color:rgba(139,92,246,.45)}
+  .card .top{display:flex;gap:14px;align-items:center}
+  .card .ic{width:76px;height:76px;border-radius:18px;overflow:hidden;flex-shrink:0;border:1px solid var(--hairline)}
+  .card .ic img{width:100%;height:100%;object-fit:cover;display:block}
+  .card .nm{font-size:15px;font-weight:700}
+  .card .ct{font-size:12px;color:var(--dim)}
+  .card .sb{font-size:13px;color:var(--muted);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .hidden{display:none}
+
+  @media(max-width:980px){
+    .cards{grid-template-columns:1fr 1fr}
+    .info{grid-template-columns:1fr}
+    .shots img,.shots video{height:230px}
+  }
+</style>
 </head>
 <body>
-    <header class="header">
-        <div class="header-inner">
-            <div class="logo"><div class="logo-icon">🌙</div> Luna Marketplace</div>
-            <a class="back-link" id="back-link" href="#">← Back to catalog</a>
+
+<header>
+  <div class="wrap hbar">
+    <div class="logo" onclick="goCatalog()"><span class="luna-text">Luna</span><span class="mp" id="mp-name">-Marketplace</span></div>
+    <a class="signin" id="signin" href="/">Sign in</a>
+  </div>
+</header>
+
+<main class="wrap">
+  <span class="crumb" onclick="goCatalog()">← Discover</span>
+  <div id="content"><div style="color:var(--muted)">Loading…</div></div>
+</main>
+
+<script>
+const parts = location.pathname.split('/');
+const mpSlug = parts[2], pluginName = decodeURIComponent(parts[4] || '');
+const token = localStorage.getItem('mp_token');
+const authH = token ? {Authorization: 'Bearer ' + token} : {};
+
+function esc(s){ return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function goCatalog(){ location.href = `/browse/${mpSlug}`; }
+
+const COVERS = {
+  connectivity:"linear-gradient(135deg,#1e1b4b,#312e81 55%,#4c1d95)",
+  ability:"linear-gradient(135deg,#2e1065,#4c1d95 55%,#6d28d9)",
+  knowledge:"linear-gradient(135deg,#172554,#1e3a8a 60%,#312e81)",
+  automation:"linear-gradient(135deg,#3b0764,#581c87 60%,#7c3aed)",
+  media:"linear-gradient(135deg,#4a044e,#701a75 55%,#86198f)",
+  development:"linear-gradient(135deg,#082f49,#0c4a6e 60%,#312e81)",
+  games:"linear-gradient(135deg,#4c0519,#881337 60%,#9d174d)",
+  communication:"linear-gradient(135deg,#042f2e,#134e4a 60%,#1e3a8a)",
+  security:"linear-gradient(135deg,#1c1917,#292524 60%,#3f3f46)",
+};
+const ICON_CHECK = `<svg viewBox="0 0 24 24" fill="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></svg>`;
+const ICON_GEAR = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
+
+let PLUGIN=null, REVIEWS=null, VERSIONS=[], ME=null;
+let INSTALLED={}, SETTINGS={}, LUNA_URL=null;
+let pickedStars=0, reviewSort='helpful';
+
+const displayName = n => esc((n||'').replace(/^plugin-/,'').replace(/-/g,' ').replace(/\b\w/g, c => c.toUpperCase()));
+const catLabel = c => c ? c.charAt(0).toUpperCase()+c.slice(1) : '';
+function starsHtml(avg){
+  const full = Math.round(avg||0);
+  return `<span class="stars">${'★'.repeat(full)}${'☆'.repeat(5-full)}</span>`;
+}
+function iconHtml(p, size){
+  const icon = (p.media||[]).find(m => m.kind === 'icon');
+  const url = icon ? icon.url : (p.icon_url && /^(https?:)?\//.test(p.icon_url) ? p.icon_url : null);
+  if (url) return `<img src="${esc(url)}" alt="">`;
+  const letter = (p.name||'?').replace(/^plugin-/,'').charAt(0).toUpperCase();
+  return `<div class="lettertile" style="background:${COVERS[p.category]||COVERS.connectivity};font-size:${size||44}px">${esc(letter)}</div>`;
+}
+function fmtDate(ts){ return ts ? new Date(ts*1000).toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'}) : '—'; }
+function relDate(ts){
+  const d = Math.floor((Date.now()/1000 - ts)/86400);
+  if (d < 1) return 'today'; if (d < 30) return d + 'd ago';
+  if (d < 365) return Math.floor(d/30) + 'mo ago'; return Math.floor(d/365) + 'y ago';
+}
+
+/* minimal readme renderer: escape everything, then # headers, **bold**, `code` */
+function prose(md){
+  return esc(md||'').split('\n').map(line => {
+    const m = line.match(/^#{1,3}\s+(.*)/);
+    return m ? `<span class="h">${m[1]}</span>` : line;
+  }).join('\n')
+  .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
+  .replace(/`([^`\n]+)`/g, '<code style="background:rgba(255,255,255,.06);border-radius:4px;padding:0 5px;font-size:13px">$1</code>');
+}
+
+async function loadAll(){
+  const pR = await fetch(`/api/catalog/${mpSlug}/${encodeURIComponent(pluginName)}`);
+  if (!pR.ok){ document.getElementById('content').innerHTML = '<div class="notice">Plugin not found.</div>'; return; }
+  PLUGIN = await pR.json();
+  const [rR, vR] = await Promise.all([
+    fetch(`/api/catalog/${mpSlug}/${encodeURIComponent(pluginName)}/reviews?sort=${reviewSort}`, {headers: authH}),
+    fetch(`/api/catalog/${mpSlug}/${encodeURIComponent(pluginName)}/versions`),
+    loadInstalled(), loadMe(),
+  ]);
+  REVIEWS = rR.ok ? await rR.json() : null;
+  VERSIONS = vR.ok ? await vR.json() : [];
+  if (PLUGIN.marketplace_slug !== 'official')
+    document.getElementById('mp-name').textContent = ' ' + PLUGIN.marketplace_name;
+  document.title = PLUGIN.name.replace(/^plugin-/,'') + ' — Luna-Marketplace';
+  render();
+}
+async function loadInstalled(){
+  if (!token) return;
+  try{
+    const r = await fetch('/api/me/installed', {headers: authH});
+    if (r.ok){ const d = await r.json(); INSTALLED = d.installed||{}; SETTINGS = d.settings||{}; LUNA_URL = d.luna_base_url; }
+  }catch(e){}
+}
+async function loadMe(){
+  if (!token) return;
+  try{
+    const r = await fetch('/api/auth/me', {headers: authH});
+    if (r.ok){ ME = await r.json(); document.getElementById('signin').textContent = ME.username; }
+  }catch(e){}
+}
+
+function installUi(){
+  const p = PLUGIN;
+  if (p.name in INSTALLED){
+    let h = `<span class="installed">${ICON_CHECK}Installed${INSTALLED[p.name]?' · v'+esc(INSTALLED[p.name]):''}</span>`;
+    if (SETTINGS[p.name] && LUNA_URL)
+      h += `<a class="gear" title="Open settings in Luna" href="${esc(LUNA_URL.replace(/\/$/,''))}/settings/plugins/${encodeURIComponent(p.name)}" target="_blank" rel="noopener">${ICON_GEAR}</a>`;
+    return h;
+  }
+  return `<button class="get" onclick="document.getElementById('installhow').scrollIntoView({behavior:'smooth'})">Install</button>`;
+}
+
+function accessHtml(){
+  const p = PLUGIN;
+  const cells = [];
+  cells.push(`<div class="acc"><div class="k">Tools</div><div class="v">${p.tool_count ? p.tool_count + ' agent tool' + (p.tool_count>1?'s':'') : 'None'}</div></div>`);
+  cells.push(`<div class="acc"><div class="k">Vault access</div><div class="v">${p.requires_vault_access ? '<span class="pill warn">Reads stored credentials</span>' : 'No'}</div></div>`);
+  const eg = p.requires_egress||[];
+  cells.push(`<div class="acc"><div class="k">Network</div><div class="v">${eg.length ? eg.map(h=>`<span class="pill">${esc(h)}</span>`).join('') : 'No outbound access declared'}</div></div>`);
+  cells.push(`<div class="acc"><div class="k">UI</div><div class="v">${[p.requires_ui_iframe?'Embedded panel':null, p.requires_settings_tab?'Settings tab':null].filter(Boolean).join(' · ') || 'None'}</div></div>`);
+  const pols = (p.tool_policies||[]).map(t => {
+    const pol = t.approval || t.policy || 'ask';
+    return `<span class="pill${pol==='auto'||pol==='allow'?'':' warn'}">${esc(t.name||'')} · ${esc(pol)}</span>`;
+  }).join('');
+  if (pols) cells.push(`<div class="acc" style="grid-column:1/-1"><div class="k">Tool approval</div><div class="v">${pols}</div></div>`);
+  return `<div class="access">${cells.join('')}</div>`;
+}
+
+function reviewsHtml(){
+  if (!REVIEWS) return '';
+  const s = REVIEWS.summary;
+  const maxH = Math.max(1, ...Object.values(s.histogram));
+  const histo = [5,4,3,2,1].map(star =>
+    `<div class="hrow"><span style="width:10px">${star}</span><div class="hbarr"><i style="width:${Math.round((s.histogram[star]||0)/maxH*100)}%"></i></div><span style="width:26px;text-align:right">${s.histogram[star]||0}</span></div>`).join('');
+
+  let write = '';
+  if (REVIEWS.can_review){
+    const mine = REVIEWS.reviews.find(r => r.is_mine);
+    write = `<div class="writebox" id="writebox">
+      <h3>${mine ? 'Edit your review' : 'Write a review'}</h3>
+      <div class="starpick" id="starpick">${[1,2,3,4,5].map(i=>`<span data-i="${i}" onclick="pickStar(${i})">★</span>`).join('')}</div>
+      <input id="rv-title" maxlength="80" placeholder="Title (optional)" value="${mine?esc(mine.title):''}">
+      <textarea id="rv-body" maxlength="2000" placeholder="What should other Luna users know?">${mine?esc(mine.body):''}</textarea>
+      <button class="btn" onclick="submitReview()">${mine ? 'Update review' : 'Post review'}</button>
+      <div class="err hidden" id="rv-err"></div>
+    </div>`;
+    if (mine) setTimeout(()=>pickStar(mine.rating), 0);
+  } else if (token){
+    write = `<div class="notice">Reviews are limited to certified users — people running a real Luna install. Link yours in Luna under <b>Settings → Marketplace</b> to get certified.</div>`;
+  } else {
+    write = `<div class="notice"><a href="/">Sign in</a> and link your Luna install to write a review.</div>`;
+  }
+
+  const list = REVIEWS.reviews.map(r => `<div class="review">
+      <div class="rh">${starsHtml(r.rating)}<span class="rt">${esc(r.title)}</span></div>
+      <div class="ra">${esc(r.author)} · ${relDate(r.created_at)}${r.edited?' · edited':''}${r.plugin_version?' · v'+esc(r.plugin_version):''}</div>
+      ${r.body ? `<div class="rb">${esc(r.body)}</div>` : ''}
+      <div class="rf">
+        <a class="${r.voted_helpful?'on':''}" onclick="voteHelpful('${esc(r.id)}')">Helpful (${r.helpful_count})</a>
+        ${r.is_mine ? `<a onclick="deleteReview('${esc(r.id)}')">Delete</a>` : ''}
+      </div>
+      ${r.response_body ? `<div class="presp"><div class="ph">Response from the publisher</div><div class="pb">${esc(r.response_body)}</div></div>` : ''}
+    </div>`).join('') || `<div style="color:var(--dim);padding:18px 0;font-size:14px">No reviews yet.</div>`;
+
+  return `<div class="sect"><h2>Ratings &amp; Reviews</h2>
+    <div class="ratrow">
+      <div class="ratbig"><div class="n">${(s.average||0).toFixed(1)}</div><div class="of">out of 5 · ${s.count} rating${s.count===1?'':'s'}</div></div>
+      <div class="histo">${histo}</div>
+    </div>
+    ${write}
+    <div style="display:flex;justify-content:flex-end;margin-top:18px">
+      <select class="sortsel" onchange="reviewSort=this.value;reloadReviews()">
+        <option value="helpful"${reviewSort==='helpful'?' selected':''}>Most helpful</option>
+        <option value="recent"${reviewSort==='recent'?' selected':''}>Most recent</option>
+        <option value="critical"${reviewSort==='critical'?' selected':''}>Most critical</option>
+      </select>
+    </div>
+    <div id="rv-list">${list}</div>
+  </div>`;
+}
+
+function render(){
+  const p = PLUGIN;
+  const shots = (p.media||[]).filter(m => m.kind === 'screenshot');
+  const latest = VERSIONS[0];
+
+  const infoRows = [
+    ['Publisher', esc(p.namespace||'—')],
+    ['Version', esc(p.latest_version||'—')],
+    ['Category', esc(catLabel(p.category)||'—')],
+    ['Downloads', String(p.download_count||0)],
+    ['License', esc(p.license||'—')],
+    ['Compatibility', esc((latest && latest.sdk_compat && latest.sdk_compat !== '0') ? latest.sdk_compat : 'Luna SDK')],
+    ['First published', fmtDate(p.created_at)],
+    ['Updated', fmtDate(p.updated_at)],
+  ];
+  if (p.source_url) infoRows.push(['Source', `<a href="${esc(p.source_url)}" target="_blank" rel="noopener">Repository</a>`]);
+
+  document.getElementById('content').innerHTML = `
+    <div class="dhead">
+      <div class="ic">${iconHtml(p)}</div>
+      <div style="flex:1;min-width:0">
+        <h1>${displayName(p.name)}</h1>
+        <div class="sub">${esc(p.description||'')}</div>
+        <div class="metaline">
+          ${starsHtml(p.rating_average)} <span>${(p.rating_average||0).toFixed(1)} (${p.rating_count})</span>
+          <span>·</span><span>${esc(catLabel(p.category)||'Plugin')}</span>
+          <span>·</span><span>${p.download_count||0} downloads</span>
         </div>
-    </header>
+        <div class="actions">${installUi()}</div>
+        <div class="copyline" id="installhow">Install from Luna: Settings → Plugins → Marketplace, or copy
+          <code onclick="copyName(this)" title="Click to copy">${esc(p.name)}</code></div>
+      </div>
+    </div>
 
-    <main class="main" id="content">
-        <div style="color: var(--text-muted); padding: 4rem; text-align: center;">Loading...</div>
-    </main>
+    ${shots.length ? `<div class="shots">${shots.map(m =>
+      m.content_type.startsWith('video')
+        ? `<video src="${esc(m.url)}" controls muted></video>`
+        : `<img src="${esc(m.url)}" alt="${esc(m.caption)}" loading="lazy">`).join('')}</div>` : ''}
 
-    <script>
-        const mpSlug = window.location.pathname.split('/browse/')[1]?.split('/plugin/')[0] || 'official';
-        const pluginName = window.location.pathname.split('/plugin/')[1] || '';
-        const ICONS = ['🔧','📊','🔌','🧠','💬','📁','🔐','🎨','📈','⚡','🌐','📋','🛡️','🔔','📦'];
-        function getIcon(name) { let h=0; for(let i=0;i<name.length;i++) h=((h<<5)-h)+name.charCodeAt(i); return ICONS[Math.abs(h)%ICONS.length]; }
+    <div class="sect"><h2>Agent Access</h2>${accessHtml()}</div>
 
-        document.getElementById('back-link').href = `/browse/${mpSlug}`;
+    ${p.readme ? `<div class="sect"><h2>About</h2><div class="prose">${prose(p.readme)}</div></div>` : ''}
 
-        async function load() {
-            const [pluginRes, versionsRes] = await Promise.all([
-                fetch(`/api/catalog/${mpSlug}/${pluginName}`),
-                fetch(`/api/catalog/${mpSlug}/${pluginName}/versions`),
-            ]);
-            if (!pluginRes.ok) { document.getElementById('content').innerHTML = '<div style="text-align:center;padding:4rem;color:var(--text-muted)">Plugin not found</div>'; return; }
-            const p = await pluginRes.json();
-            const versions = versionsRes.ok ? await versionsRes.json() : [];
+    ${latest ? `<div class="sect"><h2>What's New</h2>
+      <div style="font-size:13.5px;color:var(--dim);margin-bottom:6px">Version ${esc(latest.version)} · ${fmtDate(latest.published_at)}</div>
+      ${VERSIONS.length > 1 ? `<a style="font-size:13.5px;cursor:pointer" onclick="document.getElementById('verlist').classList.toggle('hidden')">Version history (${VERSIONS.length})</a>
+      <div class="verlist hidden" id="verlist">${VERSIONS.map(v =>
+        `<div class="verrow"><span style="min-width:70px">${esc(v.version)}</span><span style="color:var(--dim)">${fmtDate(v.published_at)}</span>${v.yanked?'<span class="yanked">yanked</span>':''}</div>`).join('')}</div>` : ''}
+    </div>` : ''}
 
-            const mpUrl = `${window.location.origin}/mp/${mpSlug}/`;
-            document.title = `${p.name} — Luna Marketplace`;
-            document.getElementById('content').innerHTML = `
-                <div class="plugin-header">
-                    <div class="plugin-icon">${p.icon_url || getIcon(p.name)}</div>
-                    <div style="flex:1">
-                        <div class="plugin-title">${p.name}</div>
-                        <div class="plugin-namespace">${p.namespace}/${p.name} · published by <strong>${p.marketplace_name || mpSlug}</strong></div>
-                        ${p.latest_version ? `<span class="plugin-version">v${p.latest_version}</span>` : ''}
-                    </div>
-                </div>
+    ${reviewsHtml()}
 
-                <div class="stats-row">
-                    <div class="stat"><div class="stat-num">${(p.download_count||0).toLocaleString()}</div><div class="stat-label">⬇ Downloads</div></div>
-                    <div class="stat"><div class="stat-num">${versions.length}</div><div class="stat-label">📦 Versions</div></div>
-                    <div class="stat"><div class="stat-num">${p.tool_count}</div><div class="stat-label">⚡ Tools</div></div>
-                    <div class="stat"><div class="stat-num">${p.license}</div><div class="stat-label">📄 License</div></div>
-                </div>
+    <div class="sect"><h2>Information</h2>
+      <div class="info">${infoRows.map(([k,v]) => `<div class="inforow"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('')}</div>
+    </div>
 
-                <div class="section" style="border-color:var(--accent)">
-                    <div class="section-title">🌙 Add to Luna</div>
-                    <div style="font-size:0.82rem;color:var(--text-muted);margin-bottom:0.75rem">Paste this marketplace URL in Luna → Settings → Marketplaces, then install <strong>${p.name}</strong> from the catalog.</div>
-                    <div class="install-cmd"><span id="mp-url">${mpUrl}</span><button onclick="navigator.clipboard.writeText('${mpUrl}');this.textContent='Copied'" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:0.35rem 0.8rem;cursor:pointer;font-size:0.75rem">Copy</button></div>
-                </div>
+    <div class="sect hidden" id="more-sect"><h2 id="more-title"></h2><div class="cards" id="more-cards"></div></div>
+  `;
+  loadMore();
+}
 
-                <div class="plugin-description">${p.description}</div>
+function copyName(el){
+  if (navigator.clipboard) navigator.clipboard.writeText(PLUGIN.name);
+  const t = el.textContent; el.textContent = 'copied!';
+  setTimeout(() => el.textContent = t, 900);
+}
 
-                ${p.tags.length ? `<div class="section"><div class="section-title">🏷️ Tags</div><div class="tags">${p.tags.map(t=>`<span class="tag">${t}</span>`).join('')}</div></div>` : ''}
+async function loadMore(){
+  if (!PLUGIN.category) return;
+  const r = await fetch(`/api/catalog/${mpSlug}?category=${encodeURIComponent(PLUGIN.category)}&sort=downloads&per_page=7`);
+  if (!r.ok) return;
+  const others = (await r.json()).filter(x => x.name !== PLUGIN.name).slice(0, 3);
+  if (!others.length) return;
+  document.getElementById('more-title').textContent = 'More in ' + catLabel(PLUGIN.category);
+  document.getElementById('more-cards').innerHTML = others.map(x => `
+    <div class="card" onclick="location.href='/browse/${mpSlug}/plugin/${encodeURIComponent(x.name)}'">
+      <div class="top"><div class="ic">${iconHtml(x, 30)}</div>
+      <div><div class="nm">${displayName(x.name)}</div><div class="ct">v${esc(x.latest_version||'')}</div></div></div>
+      <div class="sb">${esc(x.description||'')}</div>
+    </div>`).join('');
+  document.getElementById('more-sect').classList.remove('hidden');
+}
 
-                <div class="section">
-                    <div class="section-title">📋 Requirements from Luna</div>
-                    <div class="requirements-grid">
-                        <div class="req-item"><span class="req-icon">⚡</span><div><div class="req-label">Tools</div><div class="req-value">${p.tool_count} tool${p.tool_count!==1?'s':''}</div></div></div>
-                        <div class="req-item"><span class="req-icon">🖼️</span><div><div class="req-label">UI Panel</div><div class="req-value">${p.requires_ui_iframe ? 'Yes' : 'No'}</div></div></div>
-                        <div class="req-item"><span class="req-icon">⚙️</span><div><div class="req-label">Settings Tab</div><div class="req-value">${p.requires_settings_tab ? 'Yes' : 'No'}</div></div></div>
-                        <div class="req-item"><span class="req-icon">🔐</span><div><div class="req-label">Vault Access</div><div class="req-value">${p.requires_vault_access ? 'Yes' : 'No'}</div></div></div>
-                        <div class="req-item"><span class="req-icon">🌐</span><div><div class="req-label">Network Egress</div><div class="req-value">${(p.requires_egress||[]).length > 0 ? p.requires_egress.join(', ') : 'None'}</div></div></div>
-                        <div class="req-item"><span class="req-icon">📄</span><div><div class="req-label">License</div><div class="req-value">${p.license}</div></div></div>
-                    </div>
-                </div>
+/* review actions */
+function pickStar(i){
+  pickedStars = i;
+  document.querySelectorAll('#starpick span').forEach(s =>
+    s.classList.toggle('on', Number(s.dataset.i) <= i));
+}
+async function submitReview(){
+  const errEl = document.getElementById('rv-err');
+  errEl.classList.add('hidden');
+  if (!pickedStars){ errEl.textContent = 'Pick a star rating first.'; errEl.classList.remove('hidden'); return; }
+  const r = await fetch(`/api/catalog/${mpSlug}/${encodeURIComponent(pluginName)}/reviews`, {
+    method:'POST', headers:{...authH,'Content-Type':'application/json'},
+    body: JSON.stringify({rating: pickedStars, title: document.getElementById('rv-title').value.trim(), body: document.getElementById('rv-body').value.trim()}),
+  });
+  if (!r.ok){
+    const d = await r.json().catch(()=>({detail:'Failed'}));
+    errEl.textContent = typeof d.detail === 'string' ? d.detail : 'Could not save review.';
+    errEl.classList.remove('hidden'); return;
+  }
+  pickedStars = 0;
+  await reloadAllReviews();
+}
+async function voteHelpful(id){
+  if (!token){ location.href = '/'; return; }
+  const r = await fetch(`/api/catalog/${mpSlug}/${encodeURIComponent(pluginName)}/reviews/${id}/helpful`, {method:'POST', headers:authH});
+  if (r.ok) await reloadReviews();
+}
+async function deleteReview(id){
+  if (!confirm('Delete your review?')) return;
+  const r = await fetch(`/api/catalog/${mpSlug}/${encodeURIComponent(pluginName)}/reviews/${id}`, {method:'DELETE', headers:authH});
+  if (r.ok){ pickedStars = 0; await reloadAllReviews(); }
+}
+async function reloadAllReviews(){
+  const pR = await fetch(`/api/catalog/${mpSlug}/${encodeURIComponent(pluginName)}`);
+  if (pR.ok) PLUGIN = await pR.json();
+  await reloadReviews();
+}
+async function reloadReviews(){
+  const r = await fetch(`/api/catalog/${mpSlug}/${encodeURIComponent(pluginName)}/reviews?sort=${reviewSort}`, {headers: authH});
+  if (r.ok) REVIEWS = await r.json();
+  render();
+}
 
-                ${p.tool_policies && p.tool_policies.length ? `
-                <div class="section">
-                    <div class="section-title">⚡ Declared Tools</div>
-                    <div class="tools-list">
-                        ${p.tool_policies.map(t => `
-                            <div class="tool-item">
-                                <div>
-                                    <span class="tool-name">${t.name}</span>
-                                    ${t.description ? `<div style="font-size:0.75rem;color:var(--text-muted);margin-top:0.2rem">${t.description}</div>` : ''}
-                                </div>
-                                <span class="tool-policy ${t.policy}">${t.policy.replace(/_/g,' ')}</span>
-                            </div>
-                        `).join('')}
-                    </div>
-                </div>` : ''}
+loadAll();
 
-                ${versions.length ? `
-                <div class="section">
-                    <div class="section-title">📦 Versions</div>
-                    <table class="versions-table">
-                        <thead><tr><th>Version</th><th>SDK</th><th>Published</th><th>Status</th></tr></thead>
-                        <tbody>
-                            ${versions.map(v => `<tr>
-                                <td class="ver">${v.version}</td>
-                                <td>${v.sdk_compat}</td>
-                                <td>${new Date(v.published_at * 1000).toLocaleDateString()}</td>
-                                <td>${v.yanked ? '<span style="color:var(--red)">Yanked</span>' : '<span style="color:var(--green)">Active</span>'}</td>
-                            </tr>`).join('')}
-                        </tbody>
-                    </table>
-                </div>` : ''}
-
-                ${p.readme ? `<div class="section"><div class="section-title">📖 README</div><div class="readme">${simpleMarkdown(p.readme)}</div></div>` : ''}
-
-                ${p.source_url ? `<div style="margin-top:1rem;text-align:center"><a href="${p.source_url}" target="_blank" style="color:var(--accent);text-decoration:none;font-size:0.85rem">View source →</a></div>` : ''}
-            `;
-        }
-
-        function simpleMarkdown(md) {
-            return md
-                .replace(/^### (.+)$/gm, '<h3>$1</h3>')
-                .replace(/^## (.+)$/gm, '<h2>$1</h2>')
-                .replace(/^# (.+)$/gm, '<h1>$1</h1>')
-                .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-                .replace(/\*(.+?)\*/g, '<em>$1</em>')
-                .replace(/`(.+?)`/g, '<code>$1</code>')
-                .replace(/^> (.+)$/gm, '<blockquote style="border-left:3px solid var(--accent);padding-left:1rem;color:var(--text-muted)">$1</blockquote>')
-                .replace(/\n\n/g, '<br><br>')
-                .replace(/^- (.+)$/gm, '<li>$1</li>');
-        }
-
-        load();
-    </script>
+const MIN_W = 640;
+function fitScale(){ document.documentElement.style.zoom = Math.min(1, window.innerWidth / MIN_W) || 1; }
+addEventListener('resize', fitScale);
+fitScale();
+</script>
 </body>
 </html>

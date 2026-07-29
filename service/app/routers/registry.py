@@ -78,6 +78,11 @@ async def index(slug: str, db: AsyncSession = Depends(get_db)):
             "requires": pv.capabilities_required or manifest.get("requires", {}),
             "artifact": f"plugins/{p.name}/{pv.version}/artifact.zip",
             "sha256": pv.artifact_hash,
+            # Additive protocol-v0 fields — old clients ignore them.
+            "category": p.category,
+            "rating_average": p.rating_average or 0.0,
+            "rating_count": p.rating_count or 0,
+            "settings_tab": bool(p.requires_settings_tab),
         })
 
     return JSONResponse({

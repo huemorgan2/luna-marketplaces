@@ -6,7 +6,7 @@ import time
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, JSON, Float
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, JSON, Float, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
@@ -31,6 +31,9 @@ class User(Base):
     password_hash = Column(String, nullable=False)
     created_at = Column(Integer, default=now_ts)
     is_active = Column(Boolean, default=True)
+    # Set when the user links a real Luna install (handshake). Certified users
+    # may write reviews. Cleared when the last install is unlinked.
+    certified_at = Column(Integer, nullable=True)
 
     memberships = relationship("OrgMember", back_populates="user")
 
@@ -73,6 +76,9 @@ class Marketplace(Base):
     signing_key_public = Column(String, nullable=True)
     signing_key_private_encrypted = Column(String, nullable=True)
     access_token = Column(String, nullable=True)
+    # Editorial curation for the Discover page:
+    # {"heroes":[{plugin,kicker,title,sub}], "essentials":[names], "features":[{...}]}
+    curation = Column(JSON, nullable=True)
     created_at = Column(Integer, default=now_ts)
 
     org = relationship("Org", back_populates="marketplaces")
@@ -116,6 +122,9 @@ class Plugin(Base):
     source_url = Column(String, nullable=True)
     latest_version = Column(String, nullable=True)
     download_count = Column(Integer, default=0)
+    category = Column(String, nullable=True, index=True)  # taxonomy slug, see app/taxonomy.py
+    rating_average = Column(Float, default=0.0)  # denormalized from reviews
+    rating_count = Column(Integer, default=0)
     created_at = Column(Integer, default=now_ts)
     updated_at = Column(Integer, default=now_ts)
 
@@ -199,6 +208,83 @@ class Artifact(Base):
     sha256 = Column(String, primary_key=True)
     size = Column(Integer, nullable=False, default=0)
     created_at = Column(Integer, default=now_ts)
+
+
+class Review(Base):
+    """One review per user per plugin (unique pair). Editable; rating counts once.
+
+    Only certified users (users.certified_at set — they linked a real Luna
+    install) may create reviews. The publisher's own org cannot review its plugin.
+    """
+    __tablename__ = "reviews"
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    plugin_id = Column(String, ForeignKey("plugins.id"), nullable=False, index=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    rating = Column(Integer, nullable=False)  # 1..5
+    title = Column(String, default="")
+    body = Column(Text, default="")
+    plugin_version = Column(String, default="")  # version string at review time
+    helpful_count = Column(Integer, default=0)
+    created_at = Column(Integer, default=now_ts)
+    updated_at = Column(Integer, default=now_ts)
+    edited = Column(Boolean, default=False)
+    response_body = Column(Text, nullable=True)  # single publisher response
+    response_at = Column(Integer, nullable=True)
+
+    __table_args__ = (UniqueConstraint("plugin_id", "user_id", name="uq_review_plugin_user"),)
+
+
+class ReviewVote(Base):
+    """One 'helpful' vote per user per review. No downvotes."""
+    __tablename__ = "review_votes"
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    review_id = Column(String, ForeignKey("reviews.id"), nullable=False, index=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    created_at = Column(Integer, default=now_ts)
+
+    __table_args__ = (UniqueConstraint("review_id", "user_id", name="uq_vote_review_user"),)
+
+
+class PluginMedia(Base):
+    """Plugin media (icon / cover / screenshot). Bytes are content-addressed in
+    the artifact store (extension-aware); served at GET /media/{sha256}."""
+    __tablename__ = "plugin_media"
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    plugin_id = Column(String, ForeignKey("plugins.id"), nullable=False, index=True)
+    kind = Column(String, nullable=False)  # icon | cover | screenshot
+    sha256 = Column(String, nullable=False)
+    content_type = Column(String, default="image/png")
+    caption = Column(String, default="")
+    sort_order = Column(Integer, default=0)
+    created_at = Column(Integer, default=now_ts)
+
+
+class LunaInstall(Base):
+    """A Luna instance enrolled via the handshake (see routers/luna_link.py).
+
+    enroll: Luna sends its vault-stored install_id → we issue tenant secret +
+    a short-lived link code. link: a signed-in web user submits the code →
+    install binds to the user and the user becomes certified. sync: Luna
+    pushes its installed-plugin list, HMAC-signed with the secret.
+    """
+    __tablename__ = "luna_installs"
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    install_id = Column(String, unique=True, nullable=False, index=True)
+    secret = Column(String, nullable=False)  # HMAC key, server-generated
+    user_id = Column(String, ForeignKey("users.id"), nullable=True, index=True)
+    luna_name = Column(String, default="")
+    luna_version = Column(String, default="")
+    base_url = Column(String, nullable=True)  # for settings deep-links, when known
+    installed = Column(JSON, default=list)  # [{"name","version","settings":bool}]
+    link_code = Column(String, nullable=True, index=True)
+    link_code_expires = Column(Integer, default=0)
+    created_at = Column(Integer, default=now_ts)
+    linked_at = Column(Integer, nullable=True)
+    last_sync_at = Column(Integer, nullable=True)
 
 
 class UsageEvent(Base):

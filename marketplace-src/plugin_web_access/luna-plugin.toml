@@ -22,6 +22,7 @@ Built against `luna_sdk` v0 — no `import luna.*`.
 
 Source: https://github.com/huemorgan/plugin-web-access
 """
+category = "knowledge"
 
 [requires]
 tools = 3

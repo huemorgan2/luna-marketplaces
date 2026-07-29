@@ -1,5 +1,5 @@
 name = "plugin-cloudflare"
-version = "0.1.0"
+version = "0.1.1"
 description = "Cloudflare infrastructure management — DNS, cache, Workers, KV, Pages."
 entry = "plugin_cloudflare"
 sdk_version = "0"
@@ -16,6 +16,7 @@ Ships OFF by default.
 
 Source: https://github.com/huemorgan/plugin-cloudflare
 """
+category = "development"
 
 [requires]
 tools = 15

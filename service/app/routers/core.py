@@ -74,6 +74,13 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
     return TokenResponse(access_token=token)
 
 
+@router.get("/auth/me", response_model=UserResponse)
+async def me(user: User = Depends(get_current_user)):
+    return UserResponse(
+        id=user.id, email=user.email, username=user.username, created_at=user.created_at
+    )
+
+
 # ---------------------------------------------------------------------------
 # Google OAuth (server-side authorization-code flow)
 # ---------------------------------------------------------------------------

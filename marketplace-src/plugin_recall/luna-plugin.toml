@@ -1,10 +1,10 @@
 name = "plugin-recall"
-version = "0.1.0"
+version = "0.1.1"
 description = "Verbatim conversation recall — search and quote past messages."
 entry = "plugin_recall"
 sdk_version = "0"
 license = "MIT"
-category = "global"
+category = "knowledge"
 default_enabled = true
 tags = ["recall", "memory", "conversation"]
 readme = """

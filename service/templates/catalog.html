@@ -1,453 +1,346 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Luna Marketplace — Plugin Catalog</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        :root {
-            --bg: #0f0f13;
-            --surface: #1a1a22;
-            --surface-hover: #22222e;
-            --border: #2a2a36;
-            --text: #e8e8ed;
-            --text-muted: #8b8b9e;
-            --accent: #7c6cf0;
-            --accent-glow: rgba(124, 108, 240, 0.15);
-            --green: #4ade80;
-            --amber: #fbbf24;
-            --red: #f87171;
-            --blue: #60a5fa;
-            --radius: 12px;
-        }
-        body {
-            font-family: 'Inter', -apple-system, sans-serif;
-            background: var(--bg);
-            color: var(--text);
-            min-height: 100vh;
-            line-height: 1.5;
-        }
-        .header {
-            background: var(--surface);
-            border-bottom: 1px solid var(--border);
-            padding: 1.5rem 2rem;
-            position: sticky;
-            top: 0;
-            z-index: 100;
-            backdrop-filter: blur(20px);
-        }
-        .header-inner {
-            max-width: 1400px;
-            margin: 0 auto;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
-        .logo {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-            font-size: 1.25rem;
-            font-weight: 700;
-        }
-        .logo-icon {
-            width: 36px;
-            height: 36px;
-            background: linear-gradient(135deg, var(--accent), #a78bfa);
-            border-radius: 8px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 18px;
-        }
-        .search-bar {
-            flex: 1;
-            max-width: 500px;
-            margin: 0 2rem;
-            position: relative;
-        }
-        .search-bar input {
-            width: 100%;
-            padding: 0.75rem 1rem 0.75rem 2.75rem;
-            background: var(--bg);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            color: var(--text);
-            font-size: 0.9rem;
-            outline: none;
-            transition: border-color 0.2s;
-        }
-        .search-bar input:focus { border-color: var(--accent); }
-        .search-bar::before {
-            content: '🔍';
-            position: absolute;
-            left: 0.9rem;
-            top: 50%;
-            transform: translateY(-50%);
-            font-size: 0.85rem;
-        }
-        .main { max-width: 1400px; margin: 0 auto; padding: 2rem; }
-        .filters {
-            display: flex;
-            gap: 0.75rem;
-            flex-wrap: wrap;
-            margin-bottom: 2rem;
-            align-items: center;
-        }
-        .filter-chip {
-            padding: 0.4rem 0.9rem;
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 20px;
-            font-size: 0.8rem;
-            cursor: pointer;
-            transition: all 0.2s;
-            color: var(--text-muted);
-        }
-        .filter-chip:hover, .filter-chip.active {
-            border-color: var(--accent);
-            color: var(--accent);
-            background: var(--accent-glow);
-        }
-        .filter-label {
-            font-size: 0.75rem;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            font-weight: 600;
-        }
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-            gap: 1.5rem;
-        }
-        .card {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            padding: 1.5rem;
-            transition: all 0.2s;
-            cursor: pointer;
-            position: relative;
-            overflow: hidden;
-        }
-        .card:hover {
-            border-color: var(--accent);
-            transform: translateY(-2px);
-            box-shadow: 0 8px 32px rgba(0,0,0,0.3), 0 0 0 1px var(--accent);
-        }
-        .card-header {
-            display: flex;
-            align-items: flex-start;
-            gap: 1rem;
-            margin-bottom: 1rem;
-        }
-        .card-icon {
-            width: 48px;
-            height: 48px;
-            border-radius: 10px;
-            background: linear-gradient(135deg, var(--accent), #a78bfa);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 22px;
-            flex-shrink: 0;
-        }
-        .card-title-area { flex: 1; min-width: 0; }
-        .card-name {
-            font-size: 1.1rem;
-            font-weight: 600;
-            margin-bottom: 0.15rem;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-        .card-namespace {
-            font-size: 0.75rem;
-            color: var(--text-muted);
-        }
-        .card-version {
-            font-size: 0.7rem;
-            color: var(--accent);
-            background: var(--accent-glow);
-            padding: 0.15rem 0.5rem;
-            border-radius: 4px;
-            font-weight: 500;
-        }
-        .card-description {
-            color: var(--text-muted);
-            font-size: 0.85rem;
-            line-height: 1.5;
-            margin-bottom: 1rem;
-            display: -webkit-box;
-            -webkit-line-clamp: 2;
-            -webkit-box-orient: vertical;
-            overflow: hidden;
-        }
-        .card-tags {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.4rem;
-            margin-bottom: 1rem;
-        }
-        .tag {
-            font-size: 0.7rem;
-            padding: 0.2rem 0.55rem;
-            background: rgba(255,255,255,0.05);
-            border-radius: 4px;
-            color: var(--text-muted);
-        }
-        .card-footer {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding-top: 0.75rem;
-            border-top: 1px solid var(--border);
-        }
-        .card-badges {
-            display: flex;
-            gap: 0.5rem;
-        }
-        .badge {
-            display: flex;
-            align-items: center;
-            gap: 0.3rem;
-            font-size: 0.7rem;
-            color: var(--text-muted);
-            padding: 0.2rem 0.5rem;
-            background: rgba(255,255,255,0.03);
-            border-radius: 4px;
-        }
-        .badge.tools { color: var(--blue); }
-        .badge.ui { color: var(--green); }
-        .badge.vault { color: var(--amber); }
-        .badge.egress { color: var(--red); }
-        .card-downloads {
-            font-size: 0.75rem;
-            color: var(--text-muted);
-        }
-        .card-license {
-            font-size: 0.65rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            padding: 0.15rem 0.4rem;
-            border-radius: 3px;
-            font-weight: 600;
-        }
-        .card-license.mit { background: rgba(74, 222, 128, 0.1); color: var(--green); }
-        .card-license.commercial { background: rgba(251, 191, 36, 0.1); color: var(--amber); }
-        .empty-state {
-            text-align: center;
-            padding: 4rem 2rem;
-            color: var(--text-muted);
-        }
-        .empty-state h3 { font-size: 1.2rem; margin-bottom: 0.5rem; color: var(--text); }
-        .stats {
-            display: flex;
-            gap: 2rem;
-            margin-bottom: 2rem;
-            padding: 1.25rem 1.5rem;
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-        }
-        .stat { text-align: center; }
-        .stat-value { font-size: 1.5rem; font-weight: 700; color: var(--accent); }
-        .stat-label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
-        @media (max-width: 768px) {
-            .grid { grid-template-columns: 1fr; }
-            .search-bar { margin: 1rem 0 0; max-width: 100%; }
-            .header-inner { flex-wrap: wrap; }
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=720">
+<title>Luna-Marketplace</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --text:#f4f4f5; --muted:#a1a1aa; --dim:#71717a;
+    --luna-300:#c4b5fd; --luna-400:#a78bfa; --luna-500:#8b5cf6; --luna-600:#7c3aed;
+    --hairline:rgba(255,255,255,.07); --hairline2:rgba(255,255,255,.12);
+    --glass:rgba(255,255,255,.04); --star:#f5a623;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    min-height:100vh;
+    background:
+      radial-gradient(1200px 600px at 10% -10%, rgba(139,92,246,.16), transparent 60%),
+      radial-gradient(800px 400px at 100% 0%, rgba(124,58,237,.10), transparent 60%),
+      #0a0a0f;
+    background-attachment:fixed;
+    color:var(--text);
+    font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,sans-serif;
+    font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--luna-400);text-decoration:none}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.07);border-radius:999px}
+  .wrap{max-width:1100px;margin:0 auto;padding:0 28px}
+
+  header{position:sticky;top:0;z-index:10;background:rgba(10,10,15,.75);backdrop-filter:blur(12px);border-bottom:1px solid var(--hairline)}
+  .hbar{display:flex;align-items:center;gap:18px;height:58px}
+  .logo{font-weight:700;font-size:17px;cursor:pointer;letter-spacing:-.01em;white-space:nowrap}
+  .luna-text{background:linear-gradient(120deg,#c4b5fd 0%,#f0abfc 50%,#fda4af 100%);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .logo .mp{color:var(--muted);font-weight:500}
+  .search{flex:1;max-width:360px;position:relative;margin-left:auto}
+  .search svg{position:absolute;left:11px;top:50%;transform:translateY(-50%);width:14px;height:14px;stroke:var(--dim)}
+  .search input{width:100%;background:var(--glass);border:1px solid var(--hairline);border-radius:9px;color:var(--text);padding:8px 12px 8px 33px;font-size:13.5px;outline:none;font-family:inherit}
+  .search input:focus{border-color:rgba(139,92,246,.5)}
+  .signin{font-size:13.5px;color:var(--muted);white-space:nowrap}
+  .signin:hover{color:var(--luna-300)}
+
+  main{padding:28px 0 70px}
+  .pagetitle{font-size:26px;font-weight:800;letter-spacing:-.02em;margin-bottom:20px}
+
+  .heroes{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+  .hero{
+    position:relative;min-height:240px;display:flex;align-items:center;
+    background:var(--glass);border:1px solid var(--hairline);border-radius:18px;
+    padding:28px;cursor:pointer;overflow:hidden;
+  }
+  .hero:hover{border-color:var(--hairline2)}
+  .hero img.bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:right center}
+  .hero .cbg{position:absolute;inset:0}
+  .hero .scrim{position:absolute;inset:0;background:linear-gradient(90deg,rgba(10,9,15,.85),rgba(10,9,15,.38) 52%,transparent 74%)}
+  .hero .tx{position:relative;z-index:1;max-width:58%}
+  .kicker{font-size:11px;font-weight:700;letter-spacing:.09em;color:var(--luna-400);text-transform:uppercase}
+  .hero h2{font-size:25px;font-weight:800;letter-spacing:-.02em;line-height:1.15;margin:8px 0 10px}
+  .hero p{color:#c9c9d6;font-size:14.5px}
+  .bigheroes{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:44px}
+  .hero.big{min-height:300px}
+
+  .shead{display:flex;align-items:baseline;justify-content:space-between;margin:44px 0 16px;padding-top:26px;border-top:1px solid var(--hairline)}
+  .shead h2{font-size:21px;font-weight:800;letter-spacing:-.02em}
+  .shead a{font-size:14px;cursor:pointer}
+  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  .card{
+    background:var(--glass);border:1px solid var(--hairline);border-radius:16px;
+    padding:16px;cursor:pointer;display:flex;flex-direction:column;gap:12px;
+    transition:border-color .15s;
+  }
+  .card:hover{border-color:rgba(139,92,246,.45)}
+  .card .top{display:flex;gap:14px;align-items:center}
+  .card .ic{width:92px;height:92px;border-radius:20px;overflow:hidden;flex-shrink:0;border:1px solid var(--hairline)}
+  .card .ic img{width:100%;height:100%;object-fit:cover;display:block}
+  .card .nm{font-size:15px;font-weight:700}
+  .card .ct{font-size:12px;color:var(--dim)}
+  .card .sb{font-size:13px;color:var(--muted);flex:1;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .card .foot{display:flex;justify-content:flex-end;align-items:center;gap:10px}
+  .lettertile{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-weight:800;color:rgba(255,255,255,.85)}
+  .get{
+    background:rgba(255,255,255,.08);color:var(--luna-300);border:none;border-radius:999px;
+    padding:6px 18px;font-size:13.5px;font-weight:700;cursor:pointer;flex-shrink:0;font-family:inherit;
+  }
+  .get:hover{background:rgba(139,92,246,.25)}
+  .installed{
+    display:inline-flex;align-items:center;gap:6px;color:var(--muted);
+    font-size:13px;font-weight:600;padding:6px 12px;border:1px solid var(--hairline);
+    border-radius:999px;flex-shrink:0;
+  }
+  .installed svg{width:13px;height:13px;stroke:#34d399}
+  .gear{
+    display:inline-flex;align-items:center;justify-content:center;width:31px;height:31px;
+    border-radius:999px;background:rgba(255,255,255,.06);border:1px solid var(--hairline);
+    cursor:pointer;flex-shrink:0;color:var(--muted);
+  }
+  .gear:hover{color:var(--luna-300);border-color:rgba(139,92,246,.45)}
+  .gear svg{width:15px;height:15px}
+
+  .rows{display:grid;grid-template-columns:1fr 1fr;column-gap:56px}
+  .row{display:flex;align-items:center;gap:14px;padding:14px 0;border-bottom:1px solid var(--hairline);cursor:pointer}
+  .row:hover .nm{color:var(--luna-300)}
+  .row .ic{width:68px;height:68px;border-radius:16px;overflow:hidden;flex-shrink:0;border:1px solid var(--hairline)}
+  .row .ic img{width:100%;height:100%;object-fit:cover;display:block}
+  .row .tx{flex:1;min-width:0}
+  .row .nm{font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .sb{font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+  .crumb{font-size:13.5px;color:var(--muted);cursor:pointer;margin-bottom:18px;display:inline-block}
+  .crumb:hover{color:var(--text)}
+  .more{display:block;margin:22px auto 0;background:var(--glass);border:1px solid var(--hairline);color:var(--muted);border-radius:999px;padding:8px 26px;font-size:13.5px;font-weight:600;cursor:pointer;font-family:inherit}
+  .more:hover{color:var(--luna-300);border-color:rgba(139,92,246,.45)}
+  .emptymsg{color:var(--muted);padding:40px 0;text-align:center}
+  .hidden{display:none}
+
+  @media(max-width:980px){
+    .cards{grid-template-columns:1fr 1fr}
+    .rows{grid-template-columns:1fr}
+    .card .ic{width:76px;height:76px}
+    .hero .tx{max-width:62%}
+    .hero h2{font-size:21px}
+    .hero img.bg{transform:translateX(18%)}
+    .hero .scrim{background:linear-gradient(90deg,rgba(10,9,15,.94),rgba(10,9,15,.6) 55%,rgba(10,9,15,.12) 82%)}
+  }
+</style>
 </head>
 <body>
-    <header class="header">
-        <div class="header-inner">
-            <div class="logo">
-                <div class="logo-icon">🌙</div>
-                <span>Luna Marketplace</span>
-            </div>
-            <div class="search-bar">
-                <input type="text" id="search" placeholder="Search plugins..." oninput="filterPlugins()">
-            </div>
-            <div style="color: var(--text-muted); font-size: 0.8rem;">marketplaces.com.ai</div>
-        </div>
-    </header>
 
-    <main class="main">
-        <div class="stats" id="stats"></div>
+<header>
+  <div class="wrap hbar">
+    <div class="logo" onclick="goDiscover()"><span class="luna-text">Luna</span><span class="mp" id="mp-name">-Marketplace</span></div>
+    <div class="search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+      <input id="q" placeholder="Search plugins…" autocomplete="off">
+    </div>
+    <a class="signin" id="signin" href="/">Sign in</a>
+  </div>
+</header>
 
-        <div class="filters" id="filters">
-            <span class="filter-label">Filter:</span>
-            <span class="filter-chip" data-filter="all" onclick="setFilter('all')">All</span>
-            <span class="filter-chip" data-filter="tools" onclick="setFilter('tools')">Has Tools</span>
-            <span class="filter-chip" data-filter="ui" onclick="setFilter('ui')">UI Widget</span>
-            <span class="filter-chip" data-filter="settings" onclick="setFilter('settings')">Settings Tab</span>
-            <span class="filter-chip" data-filter="vault" onclick="setFilter('vault')">Vault Access</span>
-            <span class="filter-chip" data-filter="mit" onclick="setFilter('mit')">MIT</span>
-            <span class="filter-chip" data-filter="commercial" onclick="setFilter('commercial')">Commercial</span>
-        </div>
+<main class="wrap">
+  <div id="discover">
+    <div class="pagetitle">Discover</div>
+    <div class="heroes" id="heroes"></div>
+    <div id="essentials"></div>
+    <div class="bigheroes" id="bigheroes"></div>
+    <div id="toppicks"></div>
+    <div id="catsections"></div>
+  </div>
 
-        <div id="bundles-section" style="display:none; margin-bottom:2rem;">
-            <div style="font-size:0.75rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.05em; font-weight:600; margin-bottom:0.75rem;">✨ Bundles — curated plugin packs</div>
-            <div class="grid" id="bundles-grid"></div>
-        </div>
+  <div id="catpage" class="hidden">
+    <span class="crumb" onclick="goDiscover()">← Discover</span>
+    <div class="pagetitle" id="cat-title"></div>
+    <div class="rows" id="cat-rows"></div>
+    <button class="more hidden" id="cat-more" onclick="moreRows()">Show more</button>
+    <div class="emptymsg hidden" id="cat-empty">Nothing here yet.</div>
+  </div>
+</main>
 
-        <div class="grid" id="plugins-grid"></div>
-        <div class="empty-state" id="empty-state" style="display:none;">
-            <h3>No plugins found</h3>
-            <p>Try adjusting your filters or search terms</p>
-        </div>
-    </main>
+<script>
+const mpSlug = location.pathname.split('/browse/')[1]?.split('/')[0] || 'official';
+const token = localStorage.getItem('mp_token');
+const authH = token ? {Authorization: 'Bearer ' + token} : {};
 
-    <script>
-        let allPlugins = [];
-        let activeFilter = 'all';
-        const mpSlug = window.location.pathname.split('/browse/')[1]?.split('/')[0] || 'official';
+function esc(s){ return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
-        const ICONS = ['🔧','📊','🔌','🧠','💬','📁','🔐','🎨','📈','⚡','🌐','📋','🛡️','🔔','📦'];
+/* Very faint per-category tint over the glass card + gradient covers per category */
+const TINTS = {
+  connectivity:"139,92,246", ability:"56,189,248", knowledge:"96,165,250",
+  automation:"251,191,36", media:"232,121,249", development:"45,212,191",
+  games:"251,113,133", communication:"52,211,153", security:"161,161,170",
+};
+const COVERS = {
+  connectivity:"linear-gradient(135deg,#1e1b4b,#312e81 55%,#4c1d95)",
+  ability:"linear-gradient(135deg,#2e1065,#4c1d95 55%,#6d28d9)",
+  knowledge:"linear-gradient(135deg,#172554,#1e3a8a 60%,#312e81)",
+  automation:"linear-gradient(135deg,#3b0764,#581c87 60%,#7c3aed)",
+  media:"linear-gradient(135deg,#4a044e,#701a75 55%,#86198f)",
+  development:"linear-gradient(135deg,#082f49,#0c4a6e 60%,#312e81)",
+  games:"linear-gradient(135deg,#4c0519,#881337 60%,#9d174d)",
+  communication:"linear-gradient(135deg,#042f2e,#134e4a 60%,#1e3a8a)",
+  security:"linear-gradient(135deg,#1c1917,#292524 60%,#3f3f46)",
+};
+const tint = c => `radial-gradient(130% 130% at 0% 0%, rgba(${TINTS[c]||"139,92,246"},.07), transparent 55%), rgba(255,255,255,.03)`;
 
-        function getPluginIcon(name) {
-            let hash = 0;
-            for (let i = 0; i < name.length; i++) hash = ((hash << 5) - hash) + name.charCodeAt(i);
-            return ICONS[Math.abs(hash) % ICONS.length];
-        }
+const ICON_CHECK = `<svg viewBox="0 0 24 24" fill="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></svg>`;
+const ICON_GEAR = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
 
-        async function loadPlugins() {
-            try {
-                const res = await fetch(`/api/catalog/${mpSlug}`);
-                if (!res.ok) throw new Error('Failed to load');
-                allPlugins = await res.json();
-                renderStats();
-                renderPlugins(allPlugins);
-                document.querySelector('[data-filter="all"]').classList.add('active');
-            } catch(e) {
-                document.getElementById('plugins-grid').innerHTML = '';
-                document.getElementById('empty-state').style.display = 'block';
-            }
-            loadBundles();
-        }
+/* Installed state comes from the Luna handshake (/api/me/installed) when signed in. */
+let INSTALLED = {}, SETTINGS = {}, LUNA_URL = null;
+const isInstalled = p => p.name in INSTALLED;
+const hasSettings = p => !!SETTINGS[p.name];
+function settingsHref(p){
+  return LUNA_URL ? `${LUNA_URL.replace(/\/$/,'')}/settings/plugins/${encodeURIComponent(p.name)}` : null;
+}
+function gearBtn(p){
+  if (!hasSettings(p)) return "";
+  const href = settingsHref(p);
+  const inner = `<span class="gear" title="Settings for ${esc(p.name)} in Luna">${ICON_GEAR}</span>`;
+  return href ? `<a href="${esc(href)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${inner}</a>` : "";
+}
+const installUi = p => isInstalled(p)
+  ? `<span class="installed">${ICON_CHECK}Installed</span>${gearBtn(p)}`
+  : `<button class="get" onclick="event.stopPropagation();openPlugin('${esc(p.name)}')">Install</button>`;
 
-        async function loadBundles() {
-            let bundles = [];
-            try {
-                const res = await fetch(`/api/catalog/${mpSlug}/bundles`);
-                if (res.ok) bundles = await res.json();
-            } catch(e) { /* bundles are optional */ }
-            if (!bundles.length) return;
-            document.getElementById('bundles-section').style.display = 'block';
-            document.getElementById('bundles-grid').innerHTML = bundles.map(b => `
-                <div class="card" style="border-color: var(--accent);">
-                    <div class="card-header">
-                        <div class="card-icon">${b.icon_url ? `<img src="${b.icon_url}" style="width:48px;height:48px;border-radius:10px;object-fit:cover;">` : '🎁'}</div>
-                        <div class="card-title-area">
-                            <div class="card-name">${b.title || b.name}</div>
-                            <div class="card-namespace">bundle · ${(b.items||[]).length} plugins</div>
-                        </div>
-                        ${b.latest_version ? `<span class="card-version">v${b.latest_version}</span>` : ''}
-                    </div>
-                    <div class="card-description">${b.description || 'No description'}</div>
-                    <div class="card-tags">
-                        ${(b.items||[]).map(i => `<span class="tag">📦 ${i.plugin_name} v${i.version}</span>`).join('')}
-                    </div>
-                    <div class="card-footer">
-                        <div class="card-badges">${(b.tags||[]).map(t=>`<span class="badge">${t}</span>`).join('')}</div>
-                        <span class="card-downloads">⬇ ${(b.download_count||0).toLocaleString()}</span>
-                    </div>
-                </div>
-            `).join('');
-        }
+function iconHtml(p){
+  const icon = (p.media||[]).find(m => m.kind === 'icon');
+  const url = icon ? icon.url : (p.icon_url && /^(https?:)?\//.test(p.icon_url) ? p.icon_url : null);
+  if (url) return `<img src="${esc(url)}" alt="">`;
+  const letter = (p.name||'?').replace(/^plugin-/,'').charAt(0).toUpperCase();
+  return `<div class="lettertile" style="background:${COVERS[p.category]||COVERS.connectivity};font-size:34px">${esc(letter)}</div>`;
+}
+function coverBg(p){
+  const cover = (p.media||[]).find(m => m.kind === 'cover');
+  if (cover) return `<img class="bg" src="${esc(cover.url)}" alt=""><div class="scrim"></div>`;
+  return `<div class="cbg" style="background:${COVERS[p.category]||COVERS.connectivity}"></div><div class="scrim"></div>`;
+}
+const displayName = p => esc((p.name||'').replace(/^plugin-/,'').replace(/-/g,' ').replace(/\b\w/g, c => c.toUpperCase()));
 
-        function renderStats() {
-            const stats = document.getElementById('stats');
-            const tools = allPlugins.filter(p => p.requires_tools).length;
-            const ui = allPlugins.filter(p => p.requires_ui_iframe).length;
-            stats.innerHTML = `
-                <div class="stat"><div class="stat-value">${allPlugins.length}</div><div class="stat-label">Plugins</div></div>
-                <div class="stat"><div class="stat-value">${tools}</div><div class="stat-label">With Tools</div></div>
-                <div class="stat"><div class="stat-value">${ui}</div><div class="stat-label">With UI</div></div>
-                <div class="stat"><div class="stat-value">${new Set(allPlugins.flatMap(p=>p.tags)).size}</div><div class="stat-label">Tags</div></div>
-            `;
-        }
+function openPlugin(name){ location.href = `/browse/${mpSlug}/plugin/${encodeURIComponent(name)}`; }
 
-        function renderPlugins(plugins) {
-            const grid = document.getElementById('plugins-grid');
-            const empty = document.getElementById('empty-state');
+function heroCard(p, cls){
+  const kicker = p.kicker || (p.category ? p.category.charAt(0).toUpperCase()+p.category.slice(1) : 'Featured');
+  return `<div class="hero${cls?' '+cls:''}" onclick="openPlugin('${esc(p.name)}')">
+    ${coverBg(p)}
+    <div class="tx"><span class="kicker">${esc(kicker)}</span><h2>${p.hero_title?esc(p.hero_title):displayName(p)}</h2><p>${esc(p.hero_sub||p.description||'')}</p></div>
+  </div>`;
+}
+function card(p){
+  return `<div class="card" style="background:${tint(p.category)}" onclick="openPlugin('${esc(p.name)}')">
+    <div class="top">
+      <div class="ic">${iconHtml(p)}</div>
+      <div><div class="nm">${displayName(p)}</div><div class="ct">v${esc(p.latest_version||'')}</div></div>
+    </div>
+    <div class="sb">${esc(p.description||'')}</div>
+    <div class="foot">${installUi(p)}</div>
+  </div>`;
+}
+function section(title, plugins, more){
+  if (!plugins.length) return "";
+  return `<div class="shead"><h2>${esc(title)}</h2>${more||""}</div>
+    <div class="cards">${plugins.map(card).join("")}</div>`;
+}
+function row(p){
+  return `<div class="row" onclick="openPlugin('${esc(p.name)}')">
+    <div class="ic">${iconHtml(p)}</div>
+    <div class="tx"><div class="nm">${displayName(p)}</div><div class="sb">${esc(p.description||'')}</div></div>
+    ${installUi(p)}
+  </div>`;
+}
 
-            if (plugins.length === 0) {
-                grid.innerHTML = '';
-                empty.style.display = 'block';
-                return;
-            }
-            empty.style.display = 'none';
+let DISCOVER = null;
 
-            grid.innerHTML = plugins.map(p => `
-                <div class="card" onclick="window.location='/browse/${mpSlug}/plugin/${p.name}'">
-                    <div class="card-header">
-                        <div class="card-icon">${p.icon_url || getPluginIcon(p.name)}</div>
-                        <div class="card-title-area">
-                            <div class="card-name">${p.name}</div>
-                            <div class="card-namespace">${p.namespace}/${p.name}</div>
-                        </div>
-                        ${p.latest_version ? `<span class="card-version">v${p.latest_version}</span>` : ''}
-                    </div>
-                    <div class="card-description">${p.description || 'No description'}</div>
-                    <div class="card-tags">
-                        ${(p.tags || []).map(t => `<span class="tag">${t}</span>`).join('')}
-                    </div>
-                    <div class="card-footer">
-                        <div class="card-badges">
-                            ${p.tool_count > 0 ? `<span class="badge tools">⚡ ${p.tool_count} tool${p.tool_count > 1 ? 's' : ''}</span>` : ''}
-                            ${p.requires_ui_iframe ? '<span class="badge ui">🖼 UI</span>' : ''}
-                            ${p.requires_settings_tab ? '<span class="badge ui">⚙ Settings</span>' : ''}
-                            ${p.requires_vault_access ? '<span class="badge vault">🔐 Vault</span>' : ''}
-                            ${(p.requires_egress || []).length > 0 ? `<span class="badge egress">🌐 Egress</span>` : ''}
-                        </div>
-                        <span class="card-downloads">⬇ ${(p.download_count||0).toLocaleString()}</span>
-                        <span class="card-license ${p.license.toLowerCase()}">${p.license}</span>
-                    </div>
-                </div>
-            `).join('');
-        }
+async function loadInstalled(){
+  if (!token) return;
+  try{
+    const r = await fetch('/api/me/installed', {headers: authH});
+    if (!r.ok) return;
+    const d = await r.json();
+    INSTALLED = d.installed || {}; SETTINGS = d.settings || {}; LUNA_URL = d.luna_base_url;
+  }catch(e){}
+}
 
-        function filterPlugins() {
-            const search = document.getElementById('search').value.toLowerCase();
-            let filtered = allPlugins;
+async function loadDiscover(){
+  const r = await fetch(`/api/catalog/${mpSlug}/discover`);
+  if (!r.ok){ document.getElementById('heroes').innerHTML = '<div class="emptymsg">Marketplace not found.</div>'; return; }
+  DISCOVER = await r.json();
+  if (DISCOVER.marketplace.slug !== 'official')
+    document.getElementById('mp-name').textContent = ' ' + DISCOVER.marketplace.name;
+  document.getElementById('heroes').innerHTML = DISCOVER.heroes.map(p => heroCard(p)).join('');
+  document.getElementById('essentials').innerHTML = section('Essentials', DISCOVER.essentials);
+  document.getElementById('bigheroes').innerHTML = DISCOVER.features.map(p => heroCard(p, 'big')).join('');
+  document.getElementById('toppicks').innerHTML = section('Top picks', DISCOVER.top_picks);
+  document.getElementById('catsections').innerHTML = DISCOVER.categories.map(c => {
+    const more = c.total >= 4 ? `<a onclick="openCat('${esc(c.slug)}','${esc(c.label)}')">More ${esc(c.label)} »</a>` : "";
+    return section(c.label, c.plugins, more);
+  }).join('');
+}
 
-            if (search) {
-                filtered = filtered.filter(p =>
-                    p.name.toLowerCase().includes(search) ||
-                    p.description.toLowerCase().includes(search) ||
-                    (p.tags || []).some(t => t.toLowerCase().includes(search))
-                );
-            }
+/* category page with pagination (24/page) */
+let catRows = [], catShown = 0, catQuery = null;
+const PAGE = 24;
+function renderRows(){
+  catShown = Math.min(catRows.length, catShown + PAGE);
+  document.getElementById('cat-rows').innerHTML = catRows.slice(0, catShown).map(row).join('');
+  document.getElementById('cat-more').classList.toggle('hidden', catShown >= catRows.length);
+  document.getElementById('cat-empty').classList.toggle('hidden', catRows.length > 0);
+}
+function moreRows(){ renderRows(); }
+async function openCat(slug, label){
+  document.getElementById('cat-title').textContent = label;
+  const r = await fetch(`/api/catalog/${mpSlug}?category=${encodeURIComponent(slug)}&sort=downloads`);
+  catRows = r.ok ? await r.json() : [];
+  catShown = 0; renderRows(); page('catpage');
+}
+function goDiscover(){ document.getElementById('q').value=''; page('discover'); }
+function page(id){
+  for (const v of ['discover','catpage'])
+    document.getElementById(v).classList.toggle('hidden', v !== id);
+  scrollTo(0,0);
+}
 
-            if (activeFilter !== 'all') {
-                switch(activeFilter) {
-                    case 'tools': filtered = filtered.filter(p => p.requires_tools); break;
-                    case 'ui': filtered = filtered.filter(p => p.requires_ui_iframe); break;
-                    case 'settings': filtered = filtered.filter(p => p.requires_settings_tab); break;
-                    case 'vault': filtered = filtered.filter(p => p.requires_vault_access); break;
-                    case 'mit': filtered = filtered.filter(p => p.license === 'MIT'); break;
-                    case 'commercial': filtered = filtered.filter(p => p.license === 'Commercial'); break;
-                }
-            }
+/* search: full catalog, filtered client-side */
+let ALL = null, qTimer = null;
+document.getElementById('q').addEventListener('input', e => {
+  clearTimeout(qTimer);
+  qTimer = setTimeout(() => doSearch(e.target.value.trim()), 180);
+});
+async function doSearch(q){
+  if (!q){ goDiscover(); return; }
+  if (!ALL){
+    const r = await fetch(`/api/catalog/${mpSlug}?per_page=200`);
+    ALL = r.ok ? await r.json() : [];
+  }
+  const needle = q.toLowerCase();
+  catRows = ALL.filter(p =>
+    p.name.toLowerCase().includes(needle) ||
+    (p.description||'').toLowerCase().includes(needle) ||
+    (p.tags||[]).some(t => t.toLowerCase().includes(needle)));
+  document.getElementById('cat-title').textContent = `Results for "${q}"`;
+  catShown = 0; renderRows(); page('catpage');
+}
 
-            renderPlugins(filtered);
-        }
+async function me(){
+  if (!token) return;
+  try{
+    const r = await fetch('/api/auth/me', {headers: authH});
+    if (r.ok){
+      const u = await r.json();
+      const el = document.getElementById('signin');
+      el.textContent = u.username; el.href = '/';
+    }
+  }catch(e){}
+}
 
-        function setFilter(filter) {
-            activeFilter = filter;
-            document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
-            document.querySelector(`[data-filter="${filter}"]`).classList.add('active');
-            filterPlugins();
-        }
+(async () => { await loadInstalled(); await Promise.all([loadDiscover(), me()]); })();
 
-        loadPlugins();
-    </script>
+/* Reflow (not shrink) down to 640px, then scale the whole page. */
+const MIN_W = 640;
+function fitScale(){ document.documentElement.style.zoom = Math.min(1, window.innerWidth / MIN_W) || 1; }
+addEventListener('resize', fitScale);
+fitScale();
+</script>
 </body>
 </html>

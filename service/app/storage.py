@@ -17,36 +17,40 @@ _DEFAULT = Path(__file__).parent.parent / "data" / "artifacts"
 ARTIFACTS_DIR = Path(os.environ.get("ARTIFACTS_DIR", str(_DEFAULT)))
 
 
-def _path_for(sha256: str) -> Path:
-    return ARTIFACTS_DIR / sha256[:2] / f"{sha256}.zip"
+def _path_for(sha256: str, ext: str = ".zip") -> Path:
+    return ARTIFACTS_DIR / sha256[:2] / f"{sha256}{ext}"
 
 
-def exists(sha256: str) -> bool:
-    return _path_for(sha256).exists()
+def exists(sha256: str, ext: str = ".zip") -> bool:
+    return _path_for(sha256, ext).exists()
 
 
-def store(sha256: str, data: bytes) -> Path:
-    """Persist artifact bytes content-addressed by sha256. Idempotent."""
-    dest = _path_for(sha256)
+def store(sha256: str, data: bytes, ext: str = ".zip") -> Path:
+    """Persist bytes content-addressed by sha256. Idempotent.
+
+    Plugin artifacts use the default `.zip`; media bytes use `.bin` so the two
+    namespaces never collide on disk.
+    """
+    dest = _path_for(sha256, ext)
     dest.parent.mkdir(parents=True, exist_ok=True)
     if not dest.exists():
-        tmp = dest.with_suffix(".zip.tmp")
+        tmp = dest.with_suffix(dest.suffix + ".tmp")
         tmp.write_bytes(data)
         tmp.replace(dest)
     return dest
 
 
-def delete(sha256: str) -> bool:
-    """Remove artifact bytes from disk. Idempotent; returns True if a file was removed."""
-    path = _path_for(sha256)
+def delete(sha256: str, ext: str = ".zip") -> bool:
+    """Remove bytes from disk. Idempotent; returns True if a file was removed."""
+    path = _path_for(sha256, ext)
     if not path.exists():
         return False
     path.unlink()
     return True
 
 
-def read(sha256: str) -> bytes:
-    path = _path_for(sha256)
+def read(sha256: str, ext: str = ".zip") -> bytes:
+    path = _path_for(sha256, ext)
     if not path.exists():
         raise FileNotFoundError(f"artifact {sha256[:12]}… not found on disk")
     return path.read_bytes()

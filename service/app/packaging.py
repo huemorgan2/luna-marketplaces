@@ -51,7 +51,12 @@ def package_dir_to_zip(package_dir: Path) -> bytes:
     """
     files = sorted(
         p for p in package_dir.rglob("*")
-        if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"
+        if p.is_file()
+        and "__pycache__" not in p.parts
+        and p.suffix != ".pyc"
+        # `media/` holds marketing images seeded into plugin_media — never
+        # shipped inside the artifact (would bloat installs + churn the sha256).
+        and (len(p.relative_to(package_dir).parts) < 2 or p.relative_to(package_dir).parts[0] != "media")
     )
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:

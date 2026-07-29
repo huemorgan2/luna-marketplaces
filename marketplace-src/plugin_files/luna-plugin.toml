@@ -1,5 +1,5 @@
 name = "plugin-files"
-version = "0.2.0"
+version = "0.2.1"
 description = "File storage + a standalone file-browser UI, with agent file tools."
 entry = "plugin_files"
 sdk_version = "0"
@@ -21,6 +21,7 @@ Config (env): `LUNA_FILES_ROOT` (default `~/.luna/files`),
 
 Source: https://github.com/huemorgan/plugin-files
 """
+category = "ability"
 
 [requires]
 tools = 6

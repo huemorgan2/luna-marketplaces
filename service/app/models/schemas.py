@@ -89,6 +89,16 @@ class MyMarketplaceResponse(MarketplaceResponse):
     can_edit: bool = False
 
 
+class MediaItem(BaseModel):
+    """One plugin media entry, servable at /media/{sha256}."""
+
+    kind: str  # icon | cover | screenshot
+    sha256: str
+    content_type: str = "image/png"
+    caption: str = ""
+    url: str = ""  # "/media/{sha256}"
+
+
 class PluginResponse(BaseModel):
     id: str
     name: str
@@ -112,6 +122,10 @@ class PluginResponse(BaseModel):
     tool_policies: list[dict]
     marketplace_slug: str = ""
     marketplace_name: str = ""
+    category: str | None = None
+    rating_average: float = 0.0
+    rating_count: int = 0
+    media: list[MediaItem] = Field(default_factory=list)
 
 
 class PluginVersionResponse(BaseModel):
@@ -133,6 +147,7 @@ class PluginUpdate(BaseModel):
     license: str | None = None
     source_url: str | None = None
     icon_url: str | None = None
+    category: str | None = None
 
 
 class YankRequest(BaseModel):
@@ -221,3 +236,61 @@ class CatalogFilter(BaseModel):
     requires_ui: bool | None = None
     requires_vault: bool | None = None
     search: str | None = None
+
+
+# --- Reviews ---------------------------------------------------------------
+
+class ReviewCreate(BaseModel):
+    rating: int = Field(ge=1, le=5)
+    title: str = Field(default="", max_length=80)
+    body: str = Field(default="", max_length=2000)
+
+
+class ReviewResponse(BaseModel):
+    id: str
+    plugin_id: str
+    rating: int
+    title: str
+    body: str
+    author: str  # username
+    plugin_version: str
+    helpful_count: int
+    created_at: int
+    updated_at: int
+    edited: bool
+    response_body: str | None = None
+    response_at: int | None = None
+    is_mine: bool = False
+    voted_helpful: bool = False
+
+
+class ReviewSummary(BaseModel):
+    average: float
+    count: int
+    histogram: dict[int, int]  # star -> count, keys 1..5
+
+
+class PublisherResponseCreate(BaseModel):
+    body: str = Field(min_length=1, max_length=2000)
+
+
+# --- Luna handshake ---------------------------------------------------------
+
+class LunaEnrollRequest(BaseModel):
+    install_id: str = Field(min_length=8, max_length=128)
+    luna_name: str = ""
+    luna_version: str = ""
+    base_url: str | None = None
+
+
+class LunaEnrollResponse(BaseModel):
+    tenant: str  # == install record id
+    secret: str | None = None  # only on first enroll; never re-issued
+    link_code: str | None = None  # present until linked
+    link_url: str = ""
+    linked: bool = False
+    existing: bool = False
+
+
+class LinkLunaRequest(BaseModel):
+    code: str = Field(min_length=4, max_length=16)

@@ -20,7 +20,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import storage
+from . import storage, taxonomy
 from .auth import hash_password
 from .database import async_session
 from .packaging import package_source
@@ -30,6 +30,7 @@ from .models.db import (
     Org,
     OrgMember,
     Plugin,
+    PluginMedia,
     PluginVersion,
     User,
     now_ts,
@@ -43,6 +44,52 @@ OFFICIAL_ORG_ID = "00000000-0000-4000-8000-0000000000a1"
 OFFICIAL_ORG_SLUG = "luna-official"
 CORE_USER_ID = "00000000-0000-4000-8000-0000000000b1"
 CORE_USER_EMAIL = "core@luna-marketplaces.local"
+
+# Editorial curation for the official Discover page — kept in sync every boot,
+# like the marketplace name. Slots referencing missing plugins fall back to
+# download/rating order at read time (see routers/plugins.py discover()).
+OFFICIAL_CURATION: dict = {
+    "heroes": [
+        {
+            "plugin": "plugin-playbooks",
+            "kicker": "Featured",
+            "title": "Teach your agent a routine",
+            "sub": "Propose, validate and run repeatable playbooks — with the autonomy you choose.",
+        },
+        {
+            "plugin": "plugin-web-access",
+            "kicker": "Essential",
+            "title": "The web, in reach",
+            "sub": "Search, fetch and call APIs without leaving chat.",
+        },
+    ],
+    "essentials": ["plugin-web-access", "plugin-files", "plugin-recall"],
+    "features": [
+        {
+            "plugin": "plugin-mcp",
+            "kicker": "Connectivity",
+            "title": "Every MCP server, one plugin",
+            "sub": "Connect Model Context Protocol servers and use their tools natively.",
+        },
+        {
+            "plugin": "plugin-charts",
+            "kicker": "Ability",
+            "title": "Numbers, drawn",
+            "sub": "Render charts straight into the conversation.",
+        },
+    ],
+}
+
+# Content types for seeded media files.
+_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".svg": "image/svg+xml",
+    ".mp4": "video/mp4",
+}
 
 
 def _marketplace_src() -> Path:
@@ -80,12 +127,16 @@ async def _ensure_official(db: AsyncSession) -> Marketplace:
             slug=OFFICIAL_MP_SLUG,
             description="First-party plugins maintained in the luna-marketplaces repo.",
             visibility="public",
+            curation=OFFICIAL_CURATION,
             created_at=now_ts(),
         )
         db.add(mp)
-    elif mp.name != OFFICIAL_MP_NAME:
-        # Keep the display name in sync with the repo across deploys.
-        mp.name = OFFICIAL_MP_NAME
+    else:
+        # Keep display name and curation in sync with the repo across deploys.
+        if mp.name != OFFICIAL_MP_NAME:
+            mp.name = OFFICIAL_MP_NAME
+        if mp.curation != OFFICIAL_CURATION:
+            mp.curation = OFFICIAL_CURATION
 
     await db.flush()
     return mp
@@ -95,7 +146,54 @@ def _tools_from_manifest(manifest: dict) -> list[dict]:
     return manifest.get("tools", []) or []
 
 
-async def _upsert_plugin(db: AsyncSession, mp: Marketplace, manifest: dict, sha256: str, zip_bytes: bytes) -> str:
+async def _seed_media(db: AsyncSession, plugin: Plugin, pkg_dir: Path) -> None:
+    """Sync `plugin_media` rows with `<pkg>/media/` files (not shipped in the
+    artifact — packaging excludes the dir). Filename → kind: `icon.*`,
+    `cover.*`, everything else a screenshot ordered by name. Idempotent:
+    rows are replaced only when the file set changes."""
+    media_dir = pkg_dir / "media"
+    files = (
+        sorted(p for p in media_dir.iterdir() if p.is_file() and p.suffix.lower() in _MEDIA_TYPES)
+        if media_dir.is_dir()
+        else []
+    )
+
+    desired: list[tuple[str, str, str, bytes]] = []  # (kind, sha256, content_type, bytes)
+    order = 0
+    for f in files:
+        data = f.read_bytes()
+        sha = hashlib.sha256(data).hexdigest()
+        stem = f.stem.lower()
+        kind = "icon" if stem == "icon" else "cover" if stem == "cover" else "screenshot"
+        desired.append((kind, sha, _MEDIA_TYPES[f.suffix.lower()], data))
+        order += 1
+
+    existing = (
+        await db.execute(select(PluginMedia).where(PluginMedia.plugin_id == plugin.id))
+    ).scalars().all()
+    if {(m.kind, m.sha256) for m in existing} == {(k, s) for k, s, _, _ in desired}:
+        # Ensure bytes survive a recreated disk, then done.
+        for _, sha, _, data in desired:
+            if not storage.exists(sha, ext=".bin"):
+                storage.store(sha, data, ext=".bin")
+        return
+
+    for m in existing:
+        await db.delete(m)
+    for i, (kind, sha, ctype, data) in enumerate(desired):
+        storage.store(sha, data, ext=".bin")
+        db.add(PluginMedia(
+            id=str(uuid.uuid4()),
+            plugin_id=plugin.id,
+            kind=kind,
+            sha256=sha,
+            content_type=ctype,
+            caption="",
+            sort_order=i,
+        ))
+
+
+async def _upsert_plugin(db: AsyncSession, mp: Marketplace, manifest: dict, sha256: str, zip_bytes: bytes, pkg_dir: Path | None = None) -> str:
     name = manifest["name"]
     version = str(manifest["version"])
     tools = _tools_from_manifest(manifest)
@@ -117,6 +215,7 @@ async def _upsert_plugin(db: AsyncSession, mp: Marketplace, manifest: dict, sha2
             requires_tools=len(tools) > 0,
             tool_count=len(tools),
             tool_policies=tools,
+            category=taxonomy.normalize(manifest.get("category")),
             created_at=now_ts(),
             updated_at=now_ts(),
         )
@@ -129,7 +228,13 @@ async def _upsert_plugin(db: AsyncSession, mp: Marketplace, manifest: dict, sha2
         plugin.tool_count = len(tools)
         plugin.tool_policies = tools
         plugin.requires_tools = len(tools) > 0
+        cat = taxonomy.normalize(manifest.get("category"))
+        if cat:
+            plugin.category = cat
         plugin.updated_at = now_ts()
+
+    if pkg_dir is not None:
+        await _seed_media(db, plugin, pkg_dir)
 
     # Version immutability check.
     ver_result = await db.execute(
@@ -181,7 +286,7 @@ async def seed_core_plugins() -> list[str]:
                 continue
             try:
                 zip_bytes, sha256, manifest = package_source(pkg)
-                log.append(await _upsert_plugin(db, mp, manifest, sha256, zip_bytes))
+                log.append(await _upsert_plugin(db, mp, manifest, sha256, zip_bytes, pkg_dir=pkg))
             except Exception as e:  # noqa: BLE001
                 log.append(f"ERROR {pkg.name}: {e}")
         await db.commit()

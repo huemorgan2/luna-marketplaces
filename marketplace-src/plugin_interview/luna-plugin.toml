@@ -1,10 +1,10 @@
 name = "plugin-interview"
-version = "0.1.1"
+version = "0.1.2"
 description = "Adaptive knowledge-elicitation interviews → structured briefs."
 entry = "plugin_interview"
 sdk_version = "0"
 license = "MIT"
-category = "global"
+category = "knowledge"
 db_tables = ["plugin_interview_sessions", "plugin_interview_topics", "plugin_interview_turns"]
 tags = ["interview", "discovery", "briefs"]
 readme = """

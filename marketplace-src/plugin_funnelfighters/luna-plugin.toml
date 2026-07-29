@@ -1,10 +1,10 @@
 name = "plugin-funnelfighters"
-version = "0.2.0"
+version = "0.2.1"
 description = "Marketing intelligence via FunnelFighters + 4 Ducks methodology"
 entry = "plugin_funnelfighters"
 sdk_version = "0"
 license = "MIT"
-category = "connectors"
+category = "connectivity"
 default_enabled = false
 tags = ["marketing", "analytics", "connector"]
 readme = """

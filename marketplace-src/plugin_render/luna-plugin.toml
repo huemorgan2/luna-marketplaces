@@ -1,5 +1,5 @@
 name = "plugin-render"
-version = "0.1.0"
+version = "0.1.1"
 description = "Render.com service management — deploys, env vars, logs, and lifecycle control."
 entry = "plugin_render"
 sdk_version = "0"
@@ -15,6 +15,7 @@ so the connector ships its own UI without compiling into core's bundle.
 
 Source: https://github.com/huemorgan/plugin-render
 """
+category = "development"
 
 [requires]
 tools = 12

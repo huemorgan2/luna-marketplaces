@@ -17,8 +17,11 @@ from fastapi.templating import Jinja2Templates
 from .database import init_db
 from .routers.bundles import router as bundles_router
 from .routers.core import router as core_router
+from .routers.luna_link import router as luna_link_router
+from .routers.media import router as media_router
 from .routers.plugins import router as plugins_router
 from .routers.registry import router as registry_router
+from .routers.reviews import router as reviews_router
 from .seed_core import seed_core_plugins
 
 STATIC_DIR = Path(__file__).parent.parent / "static"
@@ -51,10 +54,14 @@ app = FastAPI(
 )
 
 app.include_router(core_router, prefix="/api")
+app.include_router(luna_link_router, prefix="/api")
 # bundles before plugins: /catalog/{slug}/bundles must win over /catalog/{slug}/{plugin_name}
 app.include_router(bundles_router, prefix="/api")
+# reviews before plugins: /catalog/{slug}/{name}/reviews has an /api prefix too
+app.include_router(reviews_router, prefix="/api")
 app.include_router(plugins_router, prefix="/api")
 app.include_router(registry_router)
+app.include_router(media_router)  # /media/{sha256} + /api/.../media (self-prefixed)
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -75,6 +82,12 @@ async def marketplace_catalog(request: Request, mp_slug: str):
 @app.get("/browse/{mp_slug}/plugin/{plugin_name}", response_class=HTMLResponse)
 async def plugin_detail(request: Request, mp_slug: str, plugin_name: str):
     return templates.TemplateResponse(request=request, name="plugin_detail.html")
+
+
+@app.get("/link", response_class=HTMLResponse)
+async def link_luna_page(request: Request):
+    """Landing page for Luna link codes (?code=XXXXXXXX)."""
+    return templates.TemplateResponse(request=request, name="link.html")
 
 
 @app.get("/dev-kit.zip")

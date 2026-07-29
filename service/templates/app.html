@@ -253,6 +253,15 @@
                     </div>
                     <div id="marketplace-list-shared"></div>
                 </div>
+                <div style="margin-top:2rem;">
+                    <div style="display:flex; align-items:center; gap:0.75rem; margin-bottom:1rem;">
+                        <h3 style="font-size:1rem; font-weight:600;">Linked Lunas</h3>
+                        <span id="certified-badge" class="hidden" style="font-size:0.72rem; background:rgba(74,222,128,.12); color:var(--green); border-radius:999px; padding:2px 10px; font-weight:600;">Certified reviewer</span>
+                    </div>
+                    <div id="luna-installs-list" style="color:var(--text-muted); font-size:0.85rem;">
+                        No Luna linked yet. In Luna, open Settings → Marketplace and follow the link code to certify this account.
+                    </div>
+                </div>
             </div>
 
             <!-- MARKETPLACE DETAIL -->
@@ -450,6 +459,11 @@
             window.history.replaceState({}, document.title, window.location.pathname);
         }
         if (err) { setTimeout(() => alert('Google sign-in failed: ' + err), 50); }
+        // Resume a pending Luna link (user came via /link, went through Google).
+        const pendingLink = localStorage.getItem('mp_link_code');
+        if (t && pendingLink) {
+            window.location.href = '/link?code=' + encodeURIComponent(pendingLink);
+        }
     })();
 
     // INIT
@@ -526,7 +540,31 @@
 
         await loadMarketplaces();
         await loadOfficialCatalog();
+        loadLunaInstalls();
         showPage('dashboard');
+    }
+
+    // LINKED LUNAS (certification via the Luna handshake)
+    async function loadLunaInstalls() {
+        const data = await api('GET', '/api/me/luna-installs');
+        if (!data) return;
+        document.getElementById('certified-badge').classList.toggle('hidden', !data.certified_at);
+        if (!data.installs || !data.installs.length) return;
+        const fmt = ts => ts ? new Date(ts * 1000).toLocaleDateString() : '—';
+        document.getElementById('luna-installs-list').innerHTML = data.installs.map(i => `
+            <div class="card" style="display:flex; align-items:center; justify-content:space-between; gap:1rem;">
+                <div>
+                    <div class="card-title">🌙 ${esc(i.name || 'Luna')} ${i.version ? '<span style="color:var(--text-muted); font-weight:400;">v' + esc(i.version) + '</span>' : ''}</div>
+                    <div class="card-subtitle">${i.installed_count} plugins installed · linked ${fmt(i.linked_at)} · last sync ${fmt(i.last_sync_at)}</div>
+                </div>
+                <button class="btn btn-sm" style="color:var(--red); border:1px solid var(--border); background:transparent;" onclick="unlinkLuna('${esc(i.id)}')">Unlink</button>
+            </div>`).join('');
+    }
+    async function unlinkLuna(id) {
+        if (!confirm('Unlink this Luna? If it is your last one, your account loses review certification.')) return;
+        await api('DELETE', '/api/me/luna-installs/' + id);
+        document.getElementById('luna-installs-list').innerHTML = 'No Luna linked yet. In Luna, open Settings → Marketplace and follow the link code to certify this account.';
+        loadLunaInstalls();
     }
 
     async function loadMarketplaces() {

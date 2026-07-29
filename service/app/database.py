@@ -40,7 +40,12 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 async def init_db():
     if "sqlite" in DB_URL:
         Path(DB_URL.split("///")[1]).parent.mkdir(parents=True, exist_ok=True)
+    from .migrations import run_migrations
+
     async with engine.begin() as conn:
+        # Add missing columns to pre-existing tables first (create_all only
+        # creates missing tables, never alters existing ones).
+        await run_migrations(conn)
         await conn.run_sync(Base.metadata.create_all)
 
 

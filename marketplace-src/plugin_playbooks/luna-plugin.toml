@@ -1,10 +1,10 @@
 name = "plugin-playbooks"
-version = "0.2.1"
+version = "0.2.2"
 description = "Durable multi-step playbooks — Luna builds them, triggers fire them."
 entry = "plugin_playbooks"
 sdk_version = "0"
 license = "MIT"
-category = "system"
+category = "automation"
 db_tables = ["playbooks", "playbook_versions", "playbook_runs", "playbook_step_runs", "playbook_drafts"]
 tags = ["playbooks", "workflows", "automation", "triggers"]
 readme = """

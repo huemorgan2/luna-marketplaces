@@ -1,4 +1,8 @@
-"""Seed the marketplace with sample plugins for demo/testing."""
+"""Seed the marketplace with sample plugins for demo/testing.
+
+Demo-only: sample plugins, demo users (certified), and demo reviews. The
+official marketplace is seeded from marketplace-src/ at startup (seed_core)
+and never gets fabricated reviews."""
 
 import asyncio
 import hashlib
@@ -10,11 +14,12 @@ from pathlib import Path
 
 from app.database import init_db, async_session
 from app.auth import hash_password
-from app.models.db import Marketplace, Org, OrgMember, Plugin, PluginVersion, User, now_ts
+from app.models.db import Marketplace, Org, OrgMember, Plugin, PluginVersion, Review, User, now_ts
 
 SAMPLE_PLUGINS = [
     {
         "name": "google-ads",
+        "category": "connectivity",
         "namespace": "luna-official",
         "version": "2.1.0",
         "description": "Connect Luna to Google Ads — check campaigns, adjust bids, pause/resume, generate performance reports",
@@ -36,6 +41,7 @@ SAMPLE_PLUGINS = [
     },
     {
         "name": "slack-channel",
+        "category": "communication",
         "namespace": "luna-official",
         "version": "1.5.0",
         "description": "Slack integration — Luna communicates through workspaces, channels, DMs, and threads with full approval button support",
@@ -55,6 +61,7 @@ SAMPLE_PLUGINS = [
     },
     {
         "name": "charts",
+        "category": "media",
         "namespace": "luna-official",
         "version": "1.2.0",
         "description": "Interactive Chart.js charts rendered inline in Luna's chat — bar, line, pie, doughnut, and radar charts",
@@ -73,6 +80,7 @@ SAMPLE_PLUGINS = [
     },
     {
         "name": "web-access",
+        "category": "knowledge",
         "namespace": "luna-official",
         "version": "1.0.3",
         "description": "Give Luna the ability to browse the web — fetch pages, extract content, search, and summarize URLs",
@@ -93,6 +101,7 @@ SAMPLE_PLUGINS = [
     },
     {
         "name": "scheduler",
+        "category": "automation",
         "namespace": "luna-official",
         "version": "2.0.0",
         "description": "Schedule recurring and one-off tasks — cron jobs, reminders, periodic checks, and time-based automation",
@@ -113,6 +122,7 @@ SAMPLE_PLUGINS = [
     },
     {
         "name": "memory-pinecone",
+        "category": "knowledge",
         "namespace": "luna-official",
         "version": "1.0.0",
         "description": "Alternative memory provider using Pinecone for high-scale vector search — drop-in replacement for default pgvector memory",
@@ -130,6 +140,7 @@ SAMPLE_PLUGINS = [
     },
     {
         "name": "hubspot-crm",
+        "category": "connectivity",
         "namespace": "acme-vendor",
         "version": "3.2.1",
         "description": "HubSpot CRM integration — manage contacts, deals, and pipeline from within Luna conversations",
@@ -152,6 +163,7 @@ SAMPLE_PLUGINS = [
     },
     {
         "name": "email-campaigns",
+        "category": "communication",
         "namespace": "acme-vendor",
         "version": "1.4.0",
         "description": "Design, schedule, and send email campaigns. Integrates with Mailgun and tracks open/click metrics",
@@ -202,6 +214,7 @@ async def seed():
         db.add(mp)
 
         # Add plugins
+        seeded_plugins = []
         for pdata in SAMPLE_PLUGINS:
             permissions = pdata.get("permissions", {})
             tools = permissions.get("tools", [])
@@ -217,6 +230,7 @@ async def seed():
                 latest_version=pdata["version"],
                 source_url=f"https://github.com/luna-plugins/{pdata['name']}",
                 requires_tools=len(tools) > 0,
+                category=pdata.get("category"),
                 requires_ui_iframe=permissions.get("ui_iframe", False),
                 requires_settings_tab=permissions.get("settings_tab", False),
                 requires_vault_access=permissions.get("vault_access", False),
@@ -226,6 +240,7 @@ async def seed():
                 download_count=hash(pdata["name"]) % 500 + 50,
             )
             db.add(plugin)
+            seeded_plugins.append(plugin)
 
             # Create version
             manifest_data = {k: v for k, v in pdata.items()}
@@ -242,8 +257,47 @@ async def seed():
             )
             db.add(pv)
 
+        # Demo reviewers (certified — as if they linked a Luna install) + reviews.
+        reviewers = []
+        for uname in ("mira", "jonas", "petra"):
+            r = User(
+                id=str(uuid.uuid4()),
+                email=f"{uname}@marketplaces.com.ai",
+                username=uname,
+                password_hash=hash_password("demo123"),
+                certified_at=now_ts(),
+            )
+            db.add(r)
+            reviewers.append(r)
+
+        DEMO_REVIEWS = [
+            (5, "Just works", "Set it up in two minutes and Luna handled the rest. Exactly what I hoped for."),
+            (4, "Solid, small rough edges", "Does what it says. Approval prompts are sensible. Docs could be a bit deeper."),
+            (5, "Part of my daily flow now", "I use this every day — reliable and fast, and the settings are clear."),
+        ]
+        review_count = 0
+        for i, plugin in enumerate(seeded_plugins):
+            n = (i % 3) + 1  # 1..3 reviews per plugin, varied
+            total = 0
+            for j in range(n):
+                rating, title, body = DEMO_REVIEWS[(i + j) % len(DEMO_REVIEWS)]
+                db.add(Review(
+                    id=str(uuid.uuid4()),
+                    plugin_id=plugin.id,
+                    user_id=reviewers[j].id,
+                    rating=rating,
+                    title=title,
+                    body=body,
+                    plugin_version=plugin.latest_version or "",
+                    helpful_count=(i + j) % 4,
+                ))
+                total += rating
+                review_count += 1
+            plugin.rating_count = n
+            plugin.rating_average = round(total / n, 2)
+
         await db.commit()
-        print(f"Seeded: 1 user, 1 org, 1 marketplace, {len(SAMPLE_PLUGINS)} plugins")
+        print(f"Seeded: {1 + len(reviewers)} users, 1 org, 1 marketplace, {len(SAMPLE_PLUGINS)} plugins, {review_count} reviews")
 
 
 if __name__ == "__main__":

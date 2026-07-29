@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Link your Luna — Luna-Marketplace</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --text:#f4f4f5; --muted:#a1a1aa; --dim:#71717a;
+    --luna-300:#c4b5fd; --luna-400:#a78bfa; --luna-500:#8b5cf6; --luna-600:#7c3aed;
+    --hairline:rgba(255,255,255,.07); --hairline2:rgba(255,255,255,.12);
+    --glass:rgba(255,255,255,.04);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:
+      radial-gradient(1200px 600px at 10% -10%, rgba(139,92,246,.16), transparent 60%),
+      radial-gradient(800px 400px at 100% 0%, rgba(124,58,237,.10), transparent 60%),
+      #0a0a0f;
+    color:var(--text);
+    font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,sans-serif;
+    font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased;padding:24px;
+  }
+  a{color:var(--luna-400);text-decoration:none}
+  .box{width:100%;max-width:440px;background:var(--glass);border:1px solid var(--hairline);border-radius:18px;padding:34px}
+  .logo{font-weight:700;font-size:18px;margin-bottom:22px}
+  .luna-text{background:linear-gradient(120deg,#c4b5fd 0%,#f0abfc 50%,#fda4af 100%);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .logo .mp{color:var(--muted);font-weight:500}
+  h1{font-size:21px;font-weight:800;letter-spacing:-.02em;margin-bottom:8px}
+  p.sub{color:var(--muted);font-size:14px;margin-bottom:22px}
+  .code{
+    display:flex;justify-content:center;letter-spacing:6px;font-weight:800;font-size:24px;
+    background:rgba(0,0,0,.3);border:1px solid var(--hairline2);border-radius:12px;
+    padding:14px 0;margin-bottom:22px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  input{width:100%;background:rgba(0,0,0,.25);border:1px solid var(--hairline);border-radius:9px;color:var(--text);padding:10px 13px;font-size:14px;font-family:inherit;outline:none;margin-bottom:11px}
+  input:focus{border-color:rgba(139,92,246,.5)}
+  .btn{width:100%;background:var(--luna-600);color:#fff;border:none;border-radius:999px;padding:11px 0;font-size:14.5px;font-weight:700;cursor:pointer;font-family:inherit;margin-top:4px}
+  .btn:hover{background:var(--luna-500)}
+  .btn.google{background:rgba(255,255,255,.08);color:var(--text);margin-top:10px}
+  .btn.google:hover{background:rgba(255,255,255,.13)}
+  .err{color:#f87171;font-size:13px;margin-top:12px}
+  .ok{color:#34d399;font-size:14px;margin-top:12px}
+  .hint{color:var(--dim);font-size:12.5px;margin-top:18px}
+  .hidden{display:none}
+  .whoami{font-size:13px;color:var(--muted);margin-bottom:14px}
+</style>
+</head>
+<body>
+<div class="box">
+  <div class="logo"><span class="luna-text">Luna</span><span class="mp">-Marketplace</span></div>
+
+  <div id="v-link" class="hidden">
+    <h1>Link your Luna</h1>
+    <p class="sub">This connects your Luna install to your marketplace account and certifies you to write reviews.</p>
+    <div class="code" id="codebox"></div>
+    <div class="whoami" id="whoami"></div>
+    <button class="btn" onclick="doLink()">Link this Luna to my account</button>
+    <div class="err hidden" id="link-err"></div>
+    <div class="ok hidden" id="link-ok"></div>
+  </div>
+
+  <div id="v-login" class="hidden">
+    <h1>Sign in first</h1>
+    <p class="sub">Sign in to link the Luna install that gave you this code.</p>
+    <div class="code" id="codebox2"></div>
+    <input id="l-email" type="email" placeholder="Email" autocomplete="email">
+    <input id="l-pass" type="password" placeholder="Password" autocomplete="current-password">
+    <button class="btn" onclick="doLogin()">Sign in</button>
+    <button class="btn google hidden" id="g-btn" onclick="googleLogin()">Continue with Google</button>
+    <div class="err hidden" id="login-err"></div>
+    <div class="hint">No account? <a href="/">Create one</a>, then reopen this link.</div>
+  </div>
+
+  <div id="v-nocode" class="hidden">
+    <h1>Missing link code</h1>
+    <p class="sub">Open Luna → Settings → Marketplace and use the link it shows you, or enter the code manually:</p>
+    <input id="m-code" placeholder="8-character code" maxlength="8" style="text-transform:uppercase">
+    <button class="btn" onclick="manualCode()">Continue</button>
+  </div>
+</div>
+
+<script>
+function esc(s){ return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+const params = new URLSearchParams(location.search);
+/* token may arrive via ?token= (Google OAuth round-trip through app.html) */
+if (params.get('token')){
+  localStorage.setItem('mp_token', params.get('token'));
+  params.delete('token');
+  history.replaceState(null, '', location.pathname + (params.toString() ? '?' + params.toString() : ''));
+}
+let code = (params.get('code') || localStorage.getItem('mp_link_code') || '').toUpperCase();
+const token = localStorage.getItem('mp_token');
+
+function show(id){
+  for (const v of ['v-link','v-login','v-nocode'])
+    document.getElementById(v).classList.toggle('hidden', v !== id);
+}
+
+async function boot(){
+  if (!code){ show('v-nocode'); return; }
+  document.getElementById('codebox').textContent = code;
+  document.getElementById('codebox2').textContent = code;
+  if (!token){
+    localStorage.setItem('mp_link_code', code);
+    show('v-login');
+    try{
+      const cfg = await (await fetch('/api/auth/config')).json();
+      if (cfg.google) document.getElementById('g-btn').classList.remove('hidden');
+    }catch(e){}
+    return;
+  }
+  try{
+    const r = await fetch('/api/auth/me', {headers:{Authorization:'Bearer '+token}});
+    if (!r.ok){ localStorage.removeItem('mp_token'); show('v-login'); return; }
+    const u = await r.json();
+    document.getElementById('whoami').textContent = 'Signed in as ' + u.username + ' (' + u.email + ')';
+    show('v-link');
+  }catch(e){ show('v-login'); }
+}
+
+async function doLink(){
+  const errEl = document.getElementById('link-err'), okEl = document.getElementById('link-ok');
+  errEl.classList.add('hidden');
+  const r = await fetch('/api/me/link-luna', {
+    method:'POST',
+    headers:{Authorization:'Bearer '+localStorage.getItem('mp_token'),'Content-Type':'application/json'},
+    body: JSON.stringify({code}),
+  });
+  const d = await r.json().catch(()=>({}));
+  if (!r.ok){
+    errEl.textContent = typeof d.detail === 'string' ? d.detail : 'Linking failed.';
+    errEl.classList.remove('hidden');
+    return;
+  }
+  localStorage.removeItem('mp_link_code');
+  okEl.innerHTML = 'Linked! Your account is now certified. <a href="/browse/official">Browse the marketplace</a> or <a href="/">open your dashboard</a>.';
+  okEl.classList.remove('hidden');
+  document.querySelector('#v-link .btn').classList.add('hidden');
+}
+
+async function doLogin(){
+  const errEl = document.getElementById('login-err');
+  errEl.classList.add('hidden');
+  const r = await fetch('/api/auth/login', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({email: document.getElementById('l-email').value.trim(), password: document.getElementById('l-pass').value}),
+  });
+  const d = await r.json().catch(()=>({}));
+  if (!r.ok || !d.access_token){
+    errEl.textContent = typeof d.detail === 'string' ? d.detail : 'Sign-in failed.';
+    errEl.classList.remove('hidden');
+    return;
+  }
+  localStorage.setItem('mp_token', d.access_token);
+  location.reload();
+}
+
+function googleLogin(){
+  localStorage.setItem('mp_link_code', code);
+  location.href = '/api/auth/google/login';
+}
+
+function manualCode(){
+  const c = document.getElementById('m-code').value.trim().toUpperCase();
+  if (c) location.href = '/link?code=' + encodeURIComponent(c);
+}
+
+boot();
+</script>
+</body>
+</html>
