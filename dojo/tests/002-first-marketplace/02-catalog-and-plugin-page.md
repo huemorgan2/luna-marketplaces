@@ -8,7 +8,8 @@ a developer expects (downloads, versions, permissions, add-to-Luna URL).
 2. Observe the catalog grid; find the `hello-world` card. Note its download count badge.
 3. Use the search box to filter for "hello"; confirm the card stays.
 4. Click the `hello-world` card → lands on `/browse/official/plugin/hello-world`.
-5. On the plugin page, read: stats row (Downloads / Versions / Tools / License),
+5. On the plugin page, read: stats row (Downloads / Versions / Tools — 009
+   removed License and Source; see `dojo/tests/009-trust-and-cleanup/01`),
    the **Add to Luna** box with the marketplace URL + Copy button, the
    Requirements grid, Declared Tools (`hello_world`, auto-approve), the Versions
    table (0.1.0, Active), and the rendered README.
