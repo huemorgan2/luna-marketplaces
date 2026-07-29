@@ -26,6 +26,24 @@ marketplace-src at boot. Browser: headless Chromium (Playwright).
 Screenshots: `discover.png`, `detail.png`, `link.png`, `e2e-*.png` in the
 session scratchpad.
 
+## Production verification (Render deploy dep-d9kvnn0u01pc73ekhsf0, commit 793f913)
+
+Rebased onto origin/main (publish tokens, goalseek, web-access 0.2.4, telegram)
+before pushing; post-rebase suite: 32 passed; fresh-boot seed smoke clean.
+
+- `dojo/verify_live.py` — TRUST GATE: PASS (all artifact hashes OK)
+- `/api/catalog/official/discover` — heroes playbooks/web-access with curated
+  copy, 3 essentials, 2 features; categories + icon/cover media on all seeded
+  cards; plugin-curiosity (externally published, no category/media) renders via
+  template fallbacks
+- Live handshake: enroll 200 (tenant, one-time secret, 8-char code) → signed
+  sync 200 `{installed_count: 1}` → bad signature 401 → re-enroll
+  `existing=true`, secret not re-issued
+- Pages: `/` 200, `/browse/official` 200,
+  `/browse/official/plugin/plugin-web-access` 200, `/link` 200, `/media/{sha}` 200
+- Reviews endpoint live, zero reviews in prod (no fabricated data), `can_review`
+  false when uncertified
+
 Notes
 - Demo reviews exist only in `service/seed.py` (demo DB); the official
   marketplace gets reviews exclusively from real certified users.
