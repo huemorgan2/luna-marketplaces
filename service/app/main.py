@@ -53,6 +53,19 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Read-only CORS: the Luna in-app Marketplace pane (an iframe on the agent's
+# origin) fetches the public catalog/discover/reviews JSON directly. GET/HEAD
+# only and no credentials — writes (reviews, publish, link) stay same-origin.
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "HEAD"],
+    allow_headers=["*"],
+    allow_credentials=False,
+)
+
 app.include_router(core_router, prefix="/api")
 app.include_router(luna_link_router, prefix="/api")
 # bundles before plugins: /catalog/{slug}/bundles must win over /catalog/{slug}/{plugin_name}
