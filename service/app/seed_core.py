@@ -272,6 +272,51 @@ async def _upsert_plugin(db: AsyncSession, mp: Marketplace, manifest: dict, sha2
     return f"seeded {name} {version} sha256={sha256[:12]}"
 
 
+async def _seed_default_media(db: AsyncSession, mp: Marketplace, src: Path) -> list[str]:
+    """Default art for plugins NOT seeded from marketplace-src (published
+    externally). `marketplace-src/_default_media/<plugin-name>/{icon,cover}.*`
+    applies only when the plugin exists and has no media at all, so publisher
+    uploads are never overwritten."""
+    root = src / "_default_media"
+    if not root.is_dir():
+        return []
+    log: list[str] = []
+    for d in sorted(p for p in root.iterdir() if p.is_dir()):
+        plugin = (
+            await db.execute(
+                select(Plugin).where(Plugin.marketplace_id == mp.id, Plugin.name == d.name)
+            )
+        ).scalar_one_or_none()
+        if plugin is None:
+            continue
+        existing = (
+            await db.execute(select(PluginMedia).where(PluginMedia.plugin_id == plugin.id))
+        ).scalars().all()
+        if existing:
+            continue
+        files = sorted(
+            p for p in d.iterdir() if p.is_file() and p.suffix.lower() in _MEDIA_TYPES
+        )
+        for i, f in enumerate(files):
+            data = f.read_bytes()
+            sha = hashlib.sha256(data).hexdigest()
+            stem = f.stem.lower()
+            kind = "icon" if stem == "icon" else "cover" if stem == "cover" else "screenshot"
+            storage.store(sha, data, ext=".bin")
+            db.add(PluginMedia(
+                id=str(uuid.uuid4()),
+                plugin_id=plugin.id,
+                kind=kind,
+                sha256=sha,
+                content_type=_MEDIA_TYPES[f.suffix.lower()],
+                caption="",
+                sort_order=i,
+            ))
+        if files:
+            log.append(f"default media for {d.name}: {len(files)} file(s)")
+    return log
+
+
 async def seed_core_plugins() -> list[str]:
     """Package every plugin under marketplace-src/ and upsert into official."""
     src = _marketplace_src()
@@ -289,5 +334,6 @@ async def seed_core_plugins() -> list[str]:
                 log.append(await _upsert_plugin(db, mp, manifest, sha256, zip_bytes, pkg_dir=pkg))
             except Exception as e:  # noqa: BLE001
                 log.append(f"ERROR {pkg.name}: {e}")
+        log.extend(await _seed_default_media(db, mp, src))
         await db.commit()
     return log
