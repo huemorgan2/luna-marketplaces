@@ -11,6 +11,11 @@ Flow (enroll → HMAC, mirroring linear-ascent's worldd auth):
 3. **sync** — Luna periodically pushes its installed-plugin list, signed
    `HMAC_SHA256(secret, f"{ts}.{raw_body}")` with headers
    `X-Luna-Tenant / X-Luna-Ts / X-Luna-Signature` (±300s skew).
+4. **reviews** (009) — the Marketplace pane inside Luna reads and writes
+   reviews over the same signed channel. The install *is* the author: no
+   marketplace account, no redirect to a website that doesn't know the user.
+   Every write is signed with the install secret, so an install can only ever
+   speak for itself.
 
 Certification asserts only "this account operates a real Luna install" —
 Luna has no user email, so no identity beyond the install is claimed.
@@ -25,13 +30,19 @@ import secrets as pysecrets
 import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import PUBLIC_BASE_URL, get_current_user
 from ..database import get_db
-from ..models.db import LunaInstall, User, now_ts
-from ..models.schemas import LinkLunaRequest, LunaEnrollRequest, LunaEnrollResponse
+from ..models.db import LunaInstall, Marketplace, OrgMember, Plugin, Review, ReviewVote, User, now_ts
+from ..models.schemas import (
+    LinkLunaRequest,
+    LunaEnrollRequest,
+    LunaEnrollResponse,
+    LunaReviewCreate,
+    ReviewSummary,
+)
 
 router = APIRouter()
 
@@ -163,6 +174,235 @@ async def sync(
     inst.last_sync_at = now_ts()
     await db.commit()
     return {"status": "ok", "installed_count": len(clean), "linked": inst.user_id is not None}
+
+
+# --- Reviews written from inside Luna (009) --------------------------------
+#
+# The pane never redirects to the website. It POSTs here with the install's
+# HMAC, and the install row is the author. Reads go through the same signed
+# route so the pane can tell the caller which review is theirs.
+
+DAILY_REVIEW_LIMIT = 10
+
+
+async def _resolve_plugin(mp_slug: str, plugin_name: str, db: AsyncSession):
+    mp = (
+        await db.execute(select(Marketplace).where(Marketplace.slug == mp_slug))
+    ).scalar_one_or_none()
+    if mp is None:
+        raise HTTPException(404, "Marketplace not found")
+    plugin = (
+        await db.execute(
+            select(Plugin).where(Plugin.marketplace_id == mp.id, Plugin.name == plugin_name)
+        )
+    ).scalar_one_or_none()
+    if plugin is None:
+        raise HTTPException(404, "Plugin not found")
+    return mp, plugin
+
+
+async def _signed_body(request, tenant, ts, signature, db) -> tuple[LunaInstall, dict]:
+    import json
+
+    inst, raw = await _verify_signed(request, tenant, ts, signature, db)
+    try:
+        body = json.loads(raw or b"{}")
+    except ValueError:
+        raise HTTPException(400, "invalid JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "body must be an object")
+    return inst, body
+
+
+@router.post("/luna/reviews/{mp_slug}/{plugin_name}/list")
+async def luna_list_reviews(
+    mp_slug: str,
+    plugin_name: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    x_luna_tenant: str = Header(...),
+    x_luna_ts: str = Header(...),
+    x_luna_signature: str = Header(...),
+):
+    """Reviews for a plugin, plus which one belongs to the calling install.
+
+    Body: {"sort": "helpful"|"recent"|"critical"}. POST (not GET) because the
+    signature covers the raw body.
+    """
+    from .reviews import review_author
+
+    inst, body = await _signed_body(request, x_luna_tenant, x_luna_ts, x_luna_signature, db)
+    _mp, plugin = await _resolve_plugin(mp_slug, plugin_name, db)
+    sort = str(body.get("sort") or "helpful")
+
+    query = select(Review, User.username).outerjoin(User, Review.user_id == User.id).where(
+        Review.plugin_id == plugin.id
+    )
+    if sort == "recent":
+        query = query.order_by(Review.created_at.desc())
+    elif sort == "critical":
+        query = query.order_by(Review.rating.asc(), Review.helpful_count.desc())
+    else:
+        query = query.order_by(Review.helpful_count.desc(), Review.created_at.desc())
+    rows = (await db.execute(query.limit(50))).all()
+
+    hist_rows = (
+        await db.execute(
+            select(Review.rating, func.count(Review.id))
+            .where(Review.plugin_id == plugin.id)
+            .group_by(Review.rating)
+        )
+    ).all()
+    histogram = {star: 0 for star in range(1, 6)}
+    for star, count in hist_rows:
+        histogram[int(star)] = int(count)
+
+    mine = next((r.id for r, _ in rows if r.luna_install_id == inst.id), None)
+    return {
+        "summary": ReviewSummary(
+            average=plugin.rating_average or 0.0,
+            count=plugin.rating_count or 0,
+            histogram=histogram,
+        ),
+        "reviews": [
+            {
+                "id": r.id,
+                "rating": r.rating,
+                "title": r.title or "",
+                "body": r.body or "",
+                "author": review_author(r, username),
+                "plugin_version": r.plugin_version or "",
+                "helpful_count": r.helpful_count or 0,
+                "created_at": r.created_at,
+                "updated_at": r.updated_at,
+                "edited": bool(r.edited),
+                "response_body": r.response_body,
+                "verified_install": bool(r.verified_install),
+                "is_mine": r.luna_install_id == inst.id,
+            }
+            for r, username in rows
+        ],
+        "mine": mine,
+        "can_review": True,
+        "author_default": inst.luna_name or "",
+    }
+
+
+@router.post("/luna/reviews/{mp_slug}/{plugin_name}")
+async def luna_write_review(
+    mp_slug: str,
+    plugin_name: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    x_luna_tenant: str = Header(...),
+    x_luna_ts: str = Header(...),
+    x_luna_signature: str = Header(...),
+):
+    """Create or replace this install's review of a plugin."""
+    from .reviews import _recompute_rating
+
+    inst, body = await _signed_body(request, x_luna_tenant, x_luna_ts, x_luna_signature, db)
+    data = LunaReviewCreate(**body)
+    mp, plugin = await _resolve_plugin(mp_slug, plugin_name, db)
+
+    if data.rating <= 2 and not data.body.strip():
+        raise HTTPException(400, "A written explanation is required for 1-2 star ratings")
+    # A linked install still can't review its own org's plugin.
+    if inst.user_id:
+        member = await db.execute(
+            select(OrgMember.id)
+            .where(OrgMember.org_id == mp.org_id, OrgMember.user_id == inst.user_id)
+            .limit(1)
+        )
+        if member.scalar_one_or_none() is not None:
+            raise HTTPException(403, "Members of the publishing account cannot review their own plugin")
+
+    day_ago = now_ts() - 86400
+    recent = await db.execute(
+        select(func.count(Review.id)).where(
+            Review.luna_install_id == inst.id, Review.updated_at >= day_ago
+        )
+    )
+    if int(recent.scalar() or 0) >= DAILY_REVIEW_LIMIT:
+        raise HTTPException(429, "Review rate limit reached (10/day)")
+
+    author = (data.author or inst.luna_name or "").strip() or "Luna owner"
+    existing = (
+        await db.execute(
+            select(Review).where(
+                Review.plugin_id == plugin.id, Review.luna_install_id == inst.id
+            )
+        )
+    ).scalars().first()
+
+    if existing is not None:
+        existing.rating = data.rating
+        existing.title = data.title
+        existing.body = data.body
+        existing.author_display = author
+        existing.plugin_version = data.plugin_version or plugin.latest_version or ""
+        existing.verified_install = bool(data.plugin_version)
+        existing.updated_at = now_ts()
+        existing.edited = True
+        review = existing
+    else:
+        review = Review(
+            id=str(uuid.uuid4()),
+            plugin_id=plugin.id,
+            user_id=None,
+            luna_install_id=inst.id,
+            rating=data.rating,
+            title=data.title,
+            body=data.body,
+            author_display=author,
+            plugin_version=data.plugin_version or plugin.latest_version or "",
+            verified_install=bool(data.plugin_version),
+        )
+        db.add(review)
+        await db.flush()
+
+    await _recompute_rating(db, plugin)
+    await db.commit()
+    return {
+        "status": "ok",
+        "review_id": review.id,
+        "rating_average": plugin.rating_average,
+        "rating_count": plugin.rating_count,
+    }
+
+
+@router.post("/luna/reviews/{mp_slug}/{plugin_name}/delete")
+async def luna_delete_review(
+    mp_slug: str,
+    plugin_name: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    x_luna_tenant: str = Header(...),
+    x_luna_ts: str = Header(...),
+    x_luna_signature: str = Header(...),
+):
+    """Delete this install's own review. An install can only delete its own."""
+    from .reviews import _recompute_rating
+
+    inst, _body = await _signed_body(request, x_luna_tenant, x_luna_ts, x_luna_signature, db)
+    _mp, plugin = await _resolve_plugin(mp_slug, plugin_name, db)
+    review = (
+        await db.execute(
+            select(Review).where(
+                Review.plugin_id == plugin.id, Review.luna_install_id == inst.id
+            )
+        )
+    ).scalars().first()
+    if review is None:
+        raise HTTPException(404, "No review from this install")
+    votes = await db.execute(select(ReviewVote).where(ReviewVote.review_id == review.id))
+    for v in votes.scalars():
+        await db.delete(v)
+    await db.delete(review)
+    await db.flush()
+    await _recompute_rating(db, plugin)
+    await db.commit()
+    return {"status": "deleted"}
 
 
 @router.post("/me/link-luna")

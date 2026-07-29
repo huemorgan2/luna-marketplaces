@@ -3,7 +3,6 @@ version = "0.2.1"
 description = "Marketing intelligence via FunnelFighters + 4 Ducks methodology"
 entry = "plugin_funnelfighters"
 sdk_version = "0"
-license = "MIT"
 category = "connectivity"
 default_enabled = false
 tags = ["marketing", "analytics", "connector"]
@@ -19,8 +18,6 @@ FunnelFighters tab (served as a themed iframe from the managed dir).
 the `four-ducks` skill the agent loads on demand. Built on `luna_sdk` v0:
 credentials via `ctx.vault`, authed routes via `luna_sdk.get_current_user`, live
 client held in a module singleton — no `import luna.*`.
-
-Source: https://github.com/huemorgan/plugin-funnelfighters
 """
 
 [requires]

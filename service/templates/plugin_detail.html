@@ -88,6 +88,9 @@
   .hbarr i{display:block;height:100%;background:var(--star);border-radius:999px}
   .writebox{margin-top:26px;background:var(--glass);border:1px solid var(--hairline);border-radius:14px;padding:20px}
   .writebox h3{font-size:15.5px;font-weight:700;margin-bottom:12px}
+  .ratempty{color:var(--dim);font-size:14px;padding:6px 0 2px}
+  .firstrev{color:var(--star);cursor:pointer}
+  .firstrev:hover{text-decoration:underline}
   .starpick{display:flex;gap:6px;font-size:26px;cursor:pointer;margin-bottom:12px}
   .starpick span{color:rgba(255,255,255,.18)}
   .starpick span.on{color:var(--star)}
@@ -302,15 +305,19 @@ function reviewsHtml(){
         ${r.is_mine ? `<a onclick="deleteReview('${esc(r.id)}')">Delete</a>` : ''}
       </div>
       ${r.response_body ? `<div class="presp"><div class="ph">Response from the publisher</div><div class="pb">${esc(r.response_body)}</div></div>` : ''}
-    </div>`).join('') || `<div style="color:var(--dim);padding:18px 0;font-size:14px">No reviews yet.</div>`;
+    </div>`).join('');
 
-  return `<div class="sect"><h2>Ratings &amp; Reviews</h2>
-    <div class="ratrow">
+  const ratblock = s.count
+    ? `<div class="ratrow">
       <div class="ratbig"><div class="n">${(s.average||0).toFixed(1)}</div><div class="of">out of 5 · ${s.count} rating${s.count===1?'':'s'}</div></div>
       <div class="histo">${histo}</div>
-    </div>
+    </div>`
+    : `<div class="ratempty" data-testid="mp-rating-empty">No reviews yet — be the first to say what this plugin is like.</div>`;
+
+  return `<div class="sect"><h2>Ratings &amp; Reviews</h2>
+    ${ratblock}
     ${write}
-    <div style="display:flex;justify-content:flex-end;margin-top:18px">
+    <div style="display:flex;justify-content:flex-end;margin-top:18px" class="${s.count?'':'hidden'}">
       <select class="sortsel" onchange="reviewSort=this.value;reloadReviews()">
         <option value="helpful"${reviewSort==='helpful'?' selected':''}>Most helpful</option>
         <option value="recent"${reviewSort==='recent'?' selected':''}>Most recent</option>
@@ -331,12 +338,10 @@ function render(){
     ['Version', esc(p.latest_version||'—')],
     ['Category', esc(catLabel(p.category)||'—')],
     ['Downloads', String(p.download_count||0)],
-    ['License', esc(p.license||'—')],
     ['Compatibility', esc((latest && latest.sdk_compat && latest.sdk_compat !== '0') ? latest.sdk_compat : 'Luna SDK')],
     ['First published', fmtDate(p.created_at)],
     ['Updated', fmtDate(p.updated_at)],
   ];
-  if (p.source_url) infoRows.push(['Source', `<a href="${esc(p.source_url)}" target="_blank" rel="noopener">Repository</a>`]);
 
   document.getElementById('content').innerHTML = `
     <div class="dhead">
@@ -345,8 +350,9 @@ function render(){
         <h1>${displayName(p.name)}</h1>
         <div class="sub">${esc(p.description||'')}</div>
         <div class="metaline">
-          ${starsHtml(p.rating_average)} <span>${(p.rating_average||0).toFixed(1)} (${p.rating_count})</span>
-          <span>·</span><span>${esc(catLabel(p.category)||'Plugin')}</span>
+          ${p.rating_count ? `${starsHtml(p.rating_average)} <span>${(p.rating_average||0).toFixed(1)} (${p.rating_count})</span><span>·</span>`
+            : `<a class="firstrev" data-testid="mp-review-first" onclick="jumpToWrite()">Write the first review</a><span>·</span>`}
+          <span>${esc(catLabel(p.category)||'Plugin')}</span>
           <span>·</span><span>${p.download_count||0} downloads</span>
         </div>
         <div class="actions">${installUi()}</div>
@@ -405,6 +411,11 @@ async function loadMore(){
 }
 
 /* review actions */
+function jumpToWrite(){
+  const box = document.getElementById('writebox') || document.getElementById('rv-list');
+  if (box) box.scrollIntoView({behavior:'smooth', block:'center'});
+}
+
 function pickStar(i){
   pickedStars = i;
   document.querySelectorAll('#starpick span').forEach(s =>

@@ -3,7 +3,6 @@ version = "0.1.2"
 description = "Adaptive knowledge-elicitation interviews → structured briefs."
 entry = "plugin_interview"
 sdk_version = "0"
-license = "MIT"
 category = "knowledge"
 db_tables = ["plugin_interview_sessions", "plugin_interview_topics", "plugin_interview_turns"]
 tags = ["interview", "discovery", "briefs"]
@@ -23,8 +22,6 @@ First plugin to own its **own DB tables via the SDK** (008.5/phase10, enabler E4
 `from luna_sdk import declarative_base, JSONB, UUID` gives it metadata fully
 isolated from core. Three tables (`plugin_interview_{sessions,topics,turns}`) are
 created on enable via `ctx.engine`. Imports only `luna_sdk` + stdlib + SQLAlchemy.
-
-Source: https://github.com/huemorgan/plugin-interview
 """
 
 [requires]

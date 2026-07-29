@@ -23,7 +23,6 @@ SAMPLE_PLUGINS = [
         "namespace": "luna-official",
         "version": "2.1.0",
         "description": "Connect Luna to Google Ads — check campaigns, adjust bids, pause/resume, generate performance reports",
-        "license": "Commercial",
         "tags": ["advertising", "google", "marketing", "campaigns", "analytics"],
         "readme": "# Google Ads Plugin\n\nFull Google Ads integration for Luna. Check campaign performance, adjust bids intelligently, pause underperforming campaigns, and generate weekly reports.\n\n## Features\n- Real-time campaign metrics\n- Smart bid adjustment with safety limits\n- Automatic performance alerts\n- Weekly report generation",
         "permissions": {
@@ -45,7 +44,6 @@ SAMPLE_PLUGINS = [
         "namespace": "luna-official",
         "version": "1.5.0",
         "description": "Slack integration — Luna communicates through workspaces, channels, DMs, and threads with full approval button support",
-        "license": "MIT",
         "tags": ["communication", "slack", "channels", "messaging"],
         "readme": "# Slack Channel Plugin\n\nConnect Luna to your Slack workspace. Luna can receive messages, respond in threads, and render approval buttons directly in Slack.\n\n## Setup\n1. Create a Slack app\n2. Add Bot Token and Signing Secret\n3. Configure event subscriptions",
         "permissions": {
@@ -65,7 +63,6 @@ SAMPLE_PLUGINS = [
         "namespace": "luna-official",
         "version": "1.2.0",
         "description": "Interactive Chart.js charts rendered inline in Luna's chat — bar, line, pie, doughnut, and radar charts",
-        "license": "MIT",
         "tags": ["visualization", "charts", "data", "ui"],
         "readme": "# Charts Plugin\n\nRender beautiful interactive charts directly in Luna's chat. Supports bar, line, pie, doughnut, and radar chart types.\n\n## Usage\n\nAsk Luna to visualize data and it will render an interactive Chart.js chart inline.",
         "permissions": {
@@ -84,7 +81,6 @@ SAMPLE_PLUGINS = [
         "namespace": "luna-official",
         "version": "1.0.3",
         "description": "Give Luna the ability to browse the web — fetch pages, extract content, search, and summarize URLs",
-        "license": "MIT",
         "tags": ["web", "browsing", "research", "content"],
         "readme": "# Web Access Plugin\n\nAllows Luna to browse the web, fetch page content, and extract structured information from URLs.\n\n## Tools\n- `fetch_url` — Retrieve and parse a webpage\n- `web_search` — Search the web via DuckDuckGo\n- `extract_content` — Extract main content from a URL",
         "permissions": {
@@ -105,7 +101,6 @@ SAMPLE_PLUGINS = [
         "namespace": "luna-official",
         "version": "2.0.0",
         "description": "Schedule recurring and one-off tasks — cron jobs, reminders, periodic checks, and time-based automation",
-        "license": "MIT",
         "tags": ["automation", "scheduling", "cron", "tasks", "reminders"],
         "readme": "# Scheduler Plugin\n\nGive Luna the ability to schedule tasks for the future. Supports cron expressions, one-off reminders, and periodic health checks.\n\n## Usage\n\n`/schedule every day at 9am check campaign performance`",
         "permissions": {
@@ -126,7 +121,6 @@ SAMPLE_PLUGINS = [
         "namespace": "luna-official",
         "version": "1.0.0",
         "description": "Alternative memory provider using Pinecone for high-scale vector search — drop-in replacement for default pgvector memory",
-        "license": "Commercial",
         "tags": ["memory", "vector-search", "pinecone", "provider", "enterprise"],
         "readme": "# Pinecone Memory Provider\n\nA drop-in replacement for Luna's default pgvector memory plugin. Uses Pinecone for vector storage and search, optimized for large-scale deployments.\n\n## When to use\n- More than 100k memory facts\n- Need for cross-region replication\n- Existing Pinecone infrastructure",
         "permissions": {
@@ -144,7 +138,6 @@ SAMPLE_PLUGINS = [
         "namespace": "acme-vendor",
         "version": "3.2.1",
         "description": "HubSpot CRM integration — manage contacts, deals, and pipeline from within Luna conversations",
-        "license": "Commercial",
         "tags": ["crm", "hubspot", "sales", "contacts", "deals"],
         "readme": "# HubSpot CRM Plugin\n\nFull HubSpot CRM integration. Luna can create contacts, update deals, move pipeline stages, and generate sales reports.\n\n## Features\n- Contact management\n- Deal pipeline tracking\n- Activity logging\n- Sales reporting",
         "permissions": {
@@ -167,7 +160,6 @@ SAMPLE_PLUGINS = [
         "namespace": "acme-vendor",
         "version": "1.4.0",
         "description": "Design, schedule, and send email campaigns. Integrates with Mailgun and tracks open/click metrics",
-        "license": "Commercial",
         "tags": ["email", "marketing", "campaigns", "automation", "mailgun"],
         "readme": "# Email Campaigns Plugin\n\nLuna can draft, schedule, and send email campaigns. Tracks opens, clicks, and bounces. Uses Mailgun for delivery.\n\n## Safety\nAll sends require explicit approval — no accidental mass emails.",
         "permissions": {
@@ -226,9 +218,7 @@ async def seed():
                 description=pdata["description"],
                 readme=pdata.get("readme", ""),
                 tags=pdata.get("tags", []),
-                license=pdata.get("license", "MIT"),
                 latest_version=pdata["version"],
-                source_url=f"https://github.com/luna-plugins/{pdata['name']}",
                 requires_tools=len(tools) > 0,
                 category=pdata.get("category"),
                 requires_ui_iframe=permissions.get("ui_iframe", False),

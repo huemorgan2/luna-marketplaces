@@ -4,7 +4,6 @@ version = "0.2.4"
 description = "Web search (Tavily/Google), page fetch, and HTTP client — live internet access."
 entry = "plugin_web_access"
 sdk_version = "0"
-license = "MIT"
 tags = ["web", "search", "http", "internet"]
 readme = """
 # plugin-web-access
@@ -19,8 +18,6 @@ Tavily resolves via ``vault.connect("tavily")`` (real BYOK or hosted gateway
 virtual key), then env fallback (`LUNA_TAVILY_API_KEY` /
 `LUNA_TAVILY_BASE_URL`). Google still uses vault credential names + env.
 Built against `luna_sdk` v0 — no `import luna.*`.
-
-Source: https://github.com/huemorgan/plugin-web-access
 """
 category = "knowledge"
 

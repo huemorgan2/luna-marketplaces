@@ -3,7 +3,6 @@ version = "0.1.1"
 description = "Render.com service management — deploys, env vars, logs, and lifecycle control."
 entry = "plugin_render"
 sdk_version = "0"
-license = "MIT"
 tags = ["connector", "render", "devops"]
 readme = """
 # plugin-render
@@ -12,8 +11,6 @@ Connect Luna to Render.com — manage services, trigger and inspect deploys,
 read/set/delete environment variables, and read live logs. The settings UI is
 served as a themed iframe from the plugin's managed directory (008.5/phase05),
 so the connector ships its own UI without compiling into core's bundle.
-
-Source: https://github.com/huemorgan/plugin-render
 """
 category = "development"
 

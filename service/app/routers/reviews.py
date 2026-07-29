@@ -1,9 +1,11 @@
 """Ratings & reviews API.
 
-Rules (plan 005 / guidelines §4):
+Rules (plan 005 / guidelines §4, extended by 009):
 - Only certified users (users.certified_at set via the Luna handshake) may
-  create reviews.
-- One review per user per plugin; editing overwrites and marks `edited`.
+  create reviews *here*. Reviews written from inside a Luna install come in
+  through the signed `/api/luna/reviews/...` route (routers/luna_link.py) and
+  have `user_id = NULL` — this module only reads and deletes those.
+- One review per author per plugin; editing overwrites and marks `edited`.
 - Body required for 1–2 star ratings.
 - Members of the publishing org cannot review their own plugin.
 - One publisher response per review; one helpful vote per user per review.
@@ -72,6 +74,12 @@ async def _is_org_member(db: AsyncSession, org_id: str, user_id: str) -> bool:
     return result.scalar_one_or_none() is not None
 
 
+def review_author(r: Review, username: str | None) -> str:
+    """Display name for a review: the account username when there is one,
+    otherwise the name the Luna install gave itself."""
+    return username or (r.author_display or "").strip() or "Luna owner"
+
+
 def _review_response(
     r: Review,
     author: str,
@@ -92,8 +100,9 @@ def _review_response(
         edited=r.edited,
         response_body=r.response_body,
         response_at=r.response_at,
-        is_mine=bool(user and r.user_id == user.id),
+        is_mine=bool(user and r.user_id and r.user_id == user.id),
         voted_helpful=r.id in voted_ids,
+        verified_install=bool(r.verified_install),
     )
 
 
@@ -110,7 +119,8 @@ async def list_reviews(
     """Reviews for a plugin, with summary (average + star histogram)."""
     _mp, plugin = await _get_plugin(mp_slug, plugin_name, db)
 
-    query = select(Review, User.username).join(User, Review.user_id == User.id).where(
+    # Outer join: install-authored reviews have no user row (009).
+    query = select(Review, User.username).outerjoin(User, Review.user_id == User.id).where(
         Review.plugin_id == plugin.id
     )
     if sort == "recent":
@@ -149,7 +159,10 @@ async def list_reviews(
             count=plugin.rating_count or 0,
             histogram=histogram,
         ),
-        "reviews": [_review_response(r, username, user, voted_ids) for r, username in rows],
+        "reviews": [
+            _review_response(r, review_author(r, username), user, voted_ids)
+            for r, username in rows
+        ],
         "page": page,
         "per_page": per_page,
         "can_review": bool(user and user.certified_at),
@@ -187,9 +200,11 @@ async def write_review(
 
     existing = (
         await db.execute(
-            select(Review).where(Review.plugin_id == plugin.id, Review.user_id == user.id)
+            select(Review).where(
+                Review.plugin_id == plugin.id, Review.user_id == user.id
+            )
         )
-    ).scalar_one_or_none()
+    ).scalars().first()
 
     if existing:
         existing.rating = data.rating
@@ -232,7 +247,7 @@ async def delete_review(
     if review is None or review.plugin_id != plugin.id:
         raise HTTPException(404, "Review not found")
 
-    allowed = review.user_id == user.id or is_global_editor(user)
+    allowed = (review.user_id is not None and review.user_id == user.id) or is_global_editor(user)
     if not allowed:
         owner = await db.execute(
             select(OrgMember.id).where(
@@ -268,7 +283,7 @@ async def toggle_helpful(
     review = await db.get(Review, review_id)
     if review is None or review.plugin_id != plugin.id:
         raise HTTPException(404, "Review not found")
-    if review.user_id == user.id:
+    if review.user_id is not None and review.user_id == user.id:
         raise HTTPException(400, "Cannot vote on your own review")
 
     existing = (

@@ -139,7 +139,18 @@ header#header{position:relative;z-index:10;background:rgba(10,10,15,.75);backdro
   padding:10px 14px;margin-bottom:18px;
   background:rgba(245,165,36,.1);border:1px solid rgba(245,165,36,.3);border-radius:12px;
 }
-.upgrade-banner-text{color:var(--update);font-weight:600;font-size:13px}
+.upgrade-banner-text{color:var(--update);font-weight:600;font-size:13px;cursor:pointer;user-select:none}
+.upgrade-banner-text .caret{font-style:normal;margin-left:6px;font-size:11px}
+.upgrade-banner{margin-bottom:0}
+.upgrade-list{margin:-8px 0 18px;padding:6px 4px 2px;border:1px solid rgba(245,165,36,.22);border-top:none;border-radius:0 0 12px 12px}
+.urow{display:flex;align-items:center;gap:10px;padding:7px 12px;font-size:13px}
+.urow + .urow{border-top:1px solid var(--hairline)}
+.urow .uname{font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.urow .uvers{color:var(--dim);font-size:12px;white-space:nowrap}
+.urow .uact{color:var(--update);font-weight:600;cursor:pointer;white-space:nowrap}
+.urow .uact:hover{text-decoration:underline}
+.urow.off .uname,.urow.off .uvers{color:var(--dim)}
+.urow .uact.off{color:var(--dim);cursor:default;font-weight:400}
 
 /* category rows */
 .rows{display:grid;grid-template-columns:1fr 1fr;column-gap:48px}
@@ -182,8 +193,33 @@ header#header{position:relative;z-index:10;background:rgba(10,10,15,.75);backdro
 .hrow{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--dim);margin-bottom:5px}
 .hbarr{flex:1;height:7px;background:rgba(255,255,255,.06);border-radius:999px;overflow:hidden}
 .hbarr i{display:block;height:100%;background:var(--star);border-radius:999px}
+.ratempty{color:var(--muted);font-size:14px;padding:4px 0 2px}
+.firstrev{color:var(--star);cursor:pointer}
+.firstrev:hover{text-decoration:underline}
 .reviewnote{font-size:13px;color:var(--muted);background:var(--glass);border:1px solid var(--hairline);border-radius:10px;padding:11px 15px;margin-top:18px}
+.reviewnote a{color:var(--luna-300);cursor:pointer;margin-left:6px;font-weight:600}
+.reviewnote a:hover{text-decoration:underline}
+/* the in-pane write box (009 C): reviews are written here, not on a website */
+.writebox{background:var(--glass);border:1px solid var(--hairline);border-radius:12px;padding:15px 17px;margin-top:18px}
+.writebox .wh{font-size:14px;font-weight:700;margin-bottom:9px}
+.starpick{display:flex;gap:5px;font-size:26px;line-height:1;margin-bottom:11px}
+.starpick .pk{color:rgba(255,255,255,.22);cursor:pointer;transition:color .1s,transform .1s}
+.starpick .pk:hover{transform:scale(1.12)}
+.starpick .pk.on{color:var(--star)}
+.writebox .wf{display:block;width:100%;box-sizing:border-box;margin-bottom:9px;background:rgba(255,255,255,.04);border:1px solid var(--hairline);border-radius:8px;padding:9px 11px;color:var(--text);font:inherit;font-size:13.5px}
+.writebox .wf:focus{outline:none;border-color:var(--luna-300)}
+.writebox textarea.wf{resize:vertical;min-height:76px}
+.writebox .wa{display:flex;align-items:center;gap:16px;margin-top:2px}
+.writebox .wa a{font-size:12.5px;color:var(--dim);cursor:pointer}
+.writebox .wa a:hover{color:var(--text)}
+.writebox .wa a.danger{color:#f87171;margin-left:auto}
+.ownbadge,.vbadge{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:2px 7px;border-radius:999px;white-space:nowrap}
+.ownbadge{color:var(--luna-300);background:rgba(139,92,246,.14);border:1px solid rgba(139,92,246,.35)}
+.vbadge{color:#6ee7b7;background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.3)}
 .review{padding:18px 0;border-bottom:1px solid var(--hairline)}
+.review.own{background:rgba(139,92,246,.05);border-radius:10px;padding:15px 15px 13px;margin:6px 0}
+.review .rf a{color:var(--luna-300);cursor:pointer}
+.review .rf a:hover{text-decoration:underline}
 .review .rh{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
 .review .rt{font-weight:700;font-size:14px}
 .review .ra{color:var(--dim);font-size:12px}

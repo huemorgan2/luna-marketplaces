@@ -39,7 +39,6 @@ class TelegramPlugin(LunaPlugin):
         category="connectors",
         depends_on=["plugin-vault"],
         routes_module="routes",
-        license="MIT",
         icon="send",
         settings_tabs=[
             SettingsTab(

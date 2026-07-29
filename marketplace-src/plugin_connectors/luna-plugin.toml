@@ -3,7 +3,6 @@ version = "0.1.1"
 description = "Connector aggregator — connect hundreds of platforms (via Composio) with managed OAuth, agent tools, and event triggers."
 entry = "plugin_connectors"
 sdk_version = "0"
-license = "MIT"
 category = "connectivity"
 default_enabled = true
 tags = ["connectors", "composio", "integrations", "oauth", "triggers"]
@@ -35,8 +34,6 @@ Built on `luna_sdk` v0 — no `import luna.*`:
 
 Provide a Composio API key in the settings tab (free tier available), or run on
 a deployment that injects `LUNA_COMPOSIO_API_KEY` + `LUNA_COMPOSIO_BASE_URL`.
-
-Source: https://github.com/huemorgan2/plugin-connectors
 """
 
 [requires]

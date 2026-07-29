@@ -106,9 +106,7 @@ class PluginResponse(BaseModel):
     description: str
     readme: str
     tags: list[str]
-    license: str
     icon_url: str | None
-    source_url: str | None
     latest_version: str | None
     download_count: int
     created_at: int
@@ -144,8 +142,6 @@ class PluginUpdate(BaseModel):
     description: str | None = None
     readme: str | None = None
     tags: list[str] | None = None
-    license: str | None = None
-    source_url: str | None = None
     icon_url: str | None = None
     category: str | None = None
 
@@ -232,7 +228,6 @@ class PluginPublish(BaseModel):
 
 class CatalogFilter(BaseModel):
     tags: list[str] = Field(default_factory=list)
-    license: str | None = None
     requires_ui: bool | None = None
     requires_vault: bool | None = None
     search: str | None = None
@@ -262,6 +257,8 @@ class ReviewResponse(BaseModel):
     response_at: int | None = None
     is_mine: bool = False
     voted_helpful: bool = False
+    # 009: written from inside a Luna install that had the plugin installed.
+    verified_install: bool = False
 
 
 class ReviewSummary(BaseModel):
@@ -294,3 +291,15 @@ class LunaEnrollResponse(BaseModel):
 
 class LinkLunaRequest(BaseModel):
     code: str = Field(min_length=4, max_length=16)
+
+
+class LunaReviewCreate(ReviewCreate):
+    """A review written from inside a Luna install's own Marketplace pane.
+
+    Carries no account: the request is HMAC-signed with the install secret, so
+    the install *is* the author. `author` is a display name only (never an
+    identity claim); `plugin_version` is the version the install actually has.
+    """
+
+    author: str = Field(default="", max_length=40)
+    plugin_version: str = Field(default="", max_length=50)

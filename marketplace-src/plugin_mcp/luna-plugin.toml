@@ -3,7 +3,6 @@ version = "0.1.1"
 description = "Universal MCP (Model Context Protocol) tool adapter."
 entry = "plugin_mcp"
 sdk_version = "0"
-license = "MIT"
 category = "connectivity"
 default_enabled = true
 db_tables = ["plugin_mcp_servers", "plugin_mcp_tools"]
@@ -29,8 +28,6 @@ Built on `luna_sdk` v0 — no `import luna.*`:
 
 > Needs Node on the host to spawn stdio servers (`npx`/`node`); the luna-service
 > image ships Node 22.
-
-Source: https://github.com/huemorgan2/plugin-mcp
 """
 
 [requires]

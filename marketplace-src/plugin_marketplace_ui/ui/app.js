@@ -13,6 +13,9 @@
 // Catalog API stays root-absolute — it's proxied by the control plane using the
 // session, and the iframe token is only valid there.
 const API = '/api/p/plugin-marketplace';
+// This plugin's OWN routes (the signed review proxy). Derived from the iframe's
+// own URL, so it is correct whatever the agent path is.
+const OWN_API = window.location.pathname.replace(/\/ui\/.*$/, '');
 // Agent base path (e.g. "/a/owner-abc123") derived from this iframe's URL.
 const BASE = window.location.pathname.split('/api/p/plugin-marketplace-ui')[0];
 // 008.995/008.996/035: token handling — see git history; unchanged behavior.
@@ -50,23 +53,26 @@ function requestFreshToken(prev, timeoutMs = 1500) {
   });
 }
 
-async function api(method, path, body, _retried) {
+// `base` selects which server to talk to: core plugin-marketplace by default,
+// OWN_API for this plugin's signed review proxy.
+async function api(method, path, body, _retried, base) {
+  const root = base || API;
   const opts = { method, headers: {} };
   if (TOKEN) opts.headers.Authorization = `Bearer ${TOKEN}`;
   if (body) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(`${API}${path}`, opts);
+  const res = await fetch(`${root}${path}`, opts);
   if (res.status === 401 && !_retried) {
     const prev = TOKEN;
     if (method === 'GET') {
       TOKEN = '';
       requestFreshToken(prev);
-      return api(method, path, body, true);
+      return api(method, path, body, true, base);
     }
     const refreshed = await requestFreshToken(prev);
-    if (refreshed) return api(method, path, body, true);
+    if (refreshed) return api(method, path, body, true, base);
   }
   if (!res.ok) {
     let err;
@@ -91,6 +97,8 @@ async function api(method, path, body, _retried) {
   }
   return res.json();
 }
+
+const ownApi = (method, path, body) => api(method, path, body, false, OWN_API);
 
 function setStatus(text) {
   document.getElementById('status-text').textContent = text;
@@ -271,6 +279,9 @@ let RICH = {};          // source url → discover payload (or null when unavail
 let VIEW = 'discover';  // 'discover' | 'catpage' | 'detail'
 let DETAIL = null;      // {plugin, reviews, versions, origin, slug}
 let reviewSort = 'helpful';
+// Review draft state for the open detail page. `mine` is the id of this
+// install's own review when the signed read found one.
+let RW = { rating: 0, open: false, busy: false, title: null, body: null };
 let catRows = [], catShown = 0;
 const PAGE = 24;
 
@@ -479,20 +490,55 @@ function renderTabs() {
     `<button class="srctab${i === CUR ? ' on' : ''}" data-act="src" data-i="${i}" data-testid="mp-src-tab-${i}" title="${esc(mp.marketplace.url)}">${esc(mp.marketplace.name || 'Marketplace')}</button>`).join('');
 }
 
-function renderBanner() {
-  const slot = document.getElementById('banner-slot');
-  let n = 0;
+// A bare count doesn't say what is about to change. The banner expands into a
+// per-plugin list: what it is, installed → available, and its own Update link.
+function pendingUpgrades() {
+  const ready = [];
+  const blocked = [];
   for (const mp of LCAT) {
     if (mp.error) continue;
+    const m = mp.marketplace || {};
     for (const p of mp.plugins || []) {
-      if (p.installed && p.upgrade && p.upgrade.compatible && p.upgrade.available) n++;
+      if (!p.installed || !p.upgrade || !p.upgrade.available) continue;
+      const row = {
+        name: p.name,
+        from: p.installed_version || p.version || '',
+        to: p.upgrade.available,
+        reason: p.upgrade.reason || '',
+        notes: p.release_notes || '',
+        url: m.url || '',
+        mpid: m.marketplace_id || '',
+      };
+      (p.upgrade.compatible ? ready : blocked).push(row);
     }
   }
-  if (!n) { slot.innerHTML = ''; return; }
-  slot.innerHTML = `<div class="upgrade-banner" data-testid="mp-upgrade-banner">
-    <span class="upgrade-banner-text">${n} update${n === 1 ? '' : 's'} available</span>
-    <button class="upd" id="btn-update-all" data-act="update-all" data-testid="mp-update-all">Update all (${n})</button>
+  return { ready, blocked };
+}
+
+function upgradeRowHtml(r, ok) {
+  const label = `${displayName(r.name)}`;
+  const ver = `<span class="uvers">${r.from ? `v${esc(r.from)} → ` : ''}v${esc(r.to)}</span>`;
+  const act = ok
+    ? `<a class="uact" data-act="upgrade" data-name="${esc(r.name)}" data-version="${esc(r.to)}" data-url="${esc(r.url)}" data-mpid="${esc(r.mpid)}" data-testid="mp-upgrade-row-update-${esc(r.name)}">Update</a>`
+    : `<span class="uact off" title="${esc(r.reason || 'incompatible update')}">Blocked</span>`;
+  const notes = r.notes ? ` title="${esc(r.notes)}"` : '';
+  return `<div class="urow${ok ? '' : ' off'}"${notes} data-testid="mp-upgrade-row-${esc(r.name)}">
+    <span class="uname">${label}</span>${ver}${act}
   </div>`;
+}
+
+function renderBanner() {
+  const slot = document.getElementById('banner-slot');
+  const { ready, blocked } = pendingUpgrades();
+  const n = ready.length;
+  if (!n) { slot.innerHTML = ''; return; }
+  const rows = ready.map((r) => upgradeRowHtml(r, true)).join('')
+    + blocked.map((r) => upgradeRowHtml(r, false)).join('');
+  slot.innerHTML = `<div class="upgrade-banner" data-testid="mp-upgrade-banner">
+    <span class="upgrade-banner-text" data-act="toggle-updates" data-testid="mp-upgrade-toggle">${n} update${n === 1 ? '' : 's'} available<i class="caret">▾</i></span>
+    <button class="upd" id="btn-update-all" data-act="update-all" data-testid="mp-update-all">Update all (${n})</button>
+  </div>
+  <div class="upgrade-list hidden" id="upgrade-list" data-testid="mp-upgrade-list">${rows}</div>`;
 }
 
 function renderDiscover() {
@@ -602,6 +648,43 @@ function goDiscover() {
 }
 
 // ---- detail page ----
+// Reviews are read over this plugin's signed proxy so the marketplace can tell
+// us which review is ours and whether we may write. If that fails (older
+// marketplace, no vault, offline) fall back to the public read — the section
+// still renders, just without the write box.
+async function loadReviews(info, name) {
+  const mp = curMp();
+  const url = mp && mp.marketplace ? mp.marketplace.url : '';
+  if (url) {
+    try {
+      return await ownApi('POST', '/reviews/list', {
+        marketplace_url: url, slug: info.slug, plugin: name, sort: reviewSort,
+      });
+    } catch (e) {
+      if (e.httpStatus && e.httpStatus !== 401 && e.httpStatus < 500) {
+        // A refusal we should surface once, not retry silently.
+        setStatus(`Reviews: ${e.message}`);
+      }
+    }
+  }
+  try {
+    const r = await fetch(
+      `${info.origin}/api/catalog/${encodeURIComponent(info.slug)}/${encodeURIComponent(name)}/reviews?sort=${reviewSort}`);
+    if (!r.ok) return null;
+    // Read-only: the public endpoint has no idea who we are, so nothing here
+    // is ours and `degraded` tells the write box to say why it's missing.
+    return { ...(await r.json()), can_review: false, degraded: true };
+  } catch {
+    return null;
+  }
+}
+
+async function reloadReviews() {
+  if (!DETAIL || !DETAIL.slug) return;
+  const fresh = await loadReviews({ origin: DETAIL.origin, slug: DETAIL.slug }, DETAIL.plugin.name);
+  if (fresh) { DETAIL.reviews = fresh; renderDetail(); }
+}
+
 async function openDetail(name) {
   const mp = curMp();
   const info = mp ? srcInfo(mp) : null;
@@ -621,13 +704,14 @@ async function openDetail(name) {
     const pR = await fetch(base);
     if (!pR.ok) throw new Error('Plugin not found');
     const plugin = await pR.json();
-    const [rR, vR] = await Promise.all([
-      fetch(`${base}/reviews?sort=${reviewSort}`).catch(() => null),
+    const [reviews, vR] = await Promise.all([
+      loadReviews(info, name),
       fetch(`${base}/versions`).catch(() => null),
     ]);
+    RW = { rating: 0, open: false, busy: false, title: null, body: null };
     DETAIL = {
       plugin,
-      reviews: rR && rR.ok ? await rR.json() : null,
+      reviews,
       versions: vR && vR.ok ? await vR.json() : [],
       origin: info.origin,
       slug: info.slug,
@@ -673,6 +757,41 @@ function accessHtml(p) {
   return `<div class="access">${cells.join('')}</div>`;
 }
 
+// The in-pane write box. Collapsed to a single line until the owner opens it,
+// so the reviews section still reads as reviews and not as a form.
+function writeHtml() {
+  const R = DETAIL.reviews;
+  if (!R) return '';
+  if (!R.can_review) {
+    const why = R.degraded
+      ? "Couldn't reach this marketplace's review channel, so reviews are read-only right now."
+      : "This marketplace isn't accepting reviews from this Luna yet.";
+    return `<div class="reviewnote" data-testid="mp-review-unavailable">${why}</div>`;
+  }
+  const mine = (R.reviews || []).find((r) => r.is_mine) || null;
+  if (!RW.open) {
+    const label = mine ? 'Edit your review' : 'Write a review';
+    return `<div class="reviewnote">Your review is signed by this Luna and posted straight to the marketplace — no account, no sign-in.
+      <a data-act="rv-open" data-testid="mp-review-open">${label}</a></div>`;
+  }
+  const rating = RW.rating || (mine ? mine.rating : 0);
+  const title = RW.title != null ? RW.title : (mine ? mine.title : '');
+  const body = RW.body != null ? RW.body : (mine ? mine.body : '');
+  const stars = [1, 2, 3, 4, 5].map((i) =>
+    `<span class="pk${i <= rating ? ' on' : ''}" data-act="rv-star" data-i="${i}" data-testid="mp-review-star-${i}">${i <= rating ? '★' : '☆'}</span>`).join('');
+  return `<div class="writebox" id="rv-write" data-testid="mp-review-form">
+    <div class="wh">${mine ? 'Edit your review' : 'Write a review'}</div>
+    <div class="starpick">${stars}</div>
+    <input class="wf" id="rv-title" maxlength="80" placeholder="Headline (optional)" value="${esc(title)}">
+    <textarea class="wf" id="rv-body" maxlength="2000" rows="4" placeholder="What is it like to use? A written explanation is required for 1-2 stars.">${esc(body)}</textarea>
+    <div class="wa">
+      <button class="get" data-act="rv-submit" data-testid="mp-review-submit"${RW.busy ? ' disabled' : ''}>${RW.busy ? 'Posting…' : (mine ? 'Update review' : 'Post review')}</button>
+      <a data-act="rv-cancel">Cancel</a>
+      ${mine ? '<a class="danger" data-act="rv-delete" data-testid="mp-review-delete">Delete</a>' : ''}
+    </div>
+  </div>`;
+}
+
 function reviewsHtml() {
   const R = DETAIL.reviews;
   if (!R) return '';
@@ -681,24 +800,33 @@ function reviewsHtml() {
   const histo = [5, 4, 3, 2, 1].map((star) =>
     `<div class="hrow"><span style="width:10px">${star}</span><div class="hbarr"><i style="width:${Math.round((s.histogram[star] || 0) / maxH * 100)}%"></i></div><span style="width:26px;text-align:right">${s.histogram[star] || 0}</span></div>`).join('');
 
-  const mpUrl = `${DETAIL.origin}/browse/${encodeURIComponent(DETAIL.slug)}/plugin/${encodeURIComponent(DETAIL.plugin.name)}`;
-  const note = `<div class="reviewnote">Reviews come from certified Luna owners. <a href="${esc(mpUrl)}" target="_blank" rel="noopener">Write yours on the marketplace ↗</a></div>`;
+  // The review is written here. This pane signs it with this install's own key
+  // (see reviews.py) instead of handing the owner to a website that has no
+  // idea who they are.
+  const note = writeHtml();
 
-  const list = R.reviews.map((r) => `<div class="review">
-      <div class="rh">${starsHtml(r.rating)}<span class="rt">${esc(r.title)}</span></div>
+  const ordered = [...R.reviews].sort((a, b) => (b.is_mine ? 1 : 0) - (a.is_mine ? 1 : 0));
+  const list = ordered.map((r) => `<div class="review${r.is_mine ? ' own' : ''}"${r.is_mine ? ' data-testid="mp-review-own"' : ''}>
+      <div class="rh">${starsHtml(r.rating)}<span class="rt">${esc(r.title)}</span>${r.is_mine ? '<span class="ownbadge">Your review</span>' : ''}${r.verified_install ? '<span class="vbadge" title="Written from a Luna that has this plugin installed">Verified install</span>' : ''}</div>
       <div class="ra">${esc(r.author)} · ${relDate(r.created_at)}${r.edited ? ' · edited' : ''}${r.plugin_version ? ' · v' + esc(r.plugin_version) : ''}</div>
       ${r.body ? `<div class="rb">${esc(r.body)}</div>` : ''}
-      <div class="rf"><span>Helpful (${r.helpful_count})</span></div>
+      <div class="rf"><span>Helpful (${r.helpful_count})</span>${r.is_mine ? '<a data-act="rv-edit" data-id="' + esc(r.id) + '">Edit</a><a data-act="rv-delete">Delete</a>' : ''}</div>
       ${r.response_body ? `<div class="presp"><div class="ph">Response from the publisher</div><div class="pb">${esc(r.response_body)}</div></div>` : ''}
-    </div>`).join('') || '<div style="color:var(--dim);padding:16px 0;font-size:14px">No reviews yet.</div>';
+    </div>`).join('');
 
-  return `<div class="sect"><h2>Ratings &amp; Reviews</h2>
-    <div class="ratrow">
+  // No ratings yet: empty stars read as a one-star verdict. Show an invitation
+  // instead of a 0.0 average and five empty histogram bars.
+  const ratblock = s.count
+    ? `<div class="ratrow">
       <div class="ratbig"><div class="n">${(s.average || 0).toFixed(1)}</div><div class="of">out of 5 · ${s.count} rating${s.count === 1 ? '' : 's'}</div></div>
       <div class="histo">${histo}</div>
-    </div>
+    </div>`
+    : `<div class="ratempty" data-testid="mp-rating-empty">No reviews yet — be the first to say what this plugin is like.</div>`;
+
+  return `<div class="sect"><h2>Ratings &amp; Reviews</h2>
+    ${ratblock}
     ${note}
-    <div style="display:flex;justify-content:flex-end;margin-top:16px">
+    <div style="display:flex;justify-content:flex-end;margin-top:16px" class="${s.count ? '' : 'hidden'}">
       <select class="hbtn" id="rv-sort">
         <option value="helpful"${reviewSort === 'helpful' ? ' selected' : ''}>Most helpful</option>
         <option value="recent"${reviewSort === 'recent' ? ' selected' : ''}>Most recent</option>
@@ -721,13 +849,11 @@ function renderDetail() {
     ['Version', esc(p.latest_version || '—')],
     ['Category', esc(catLabel(p.category) || '—')],
     ['Downloads', String(p.download_count || 0)],
-    ['License', esc(p.license || '—')],
     ['First published', fmtDate(p.created_at)],
     ['Updated', fmtDate(p.updated_at)],
   ];
-  if (p.source_url) infoRows.push(['Source', `<a href="${esc(p.source_url)}" target="_blank" rel="noopener">Repository</a>`]);
 
-  const hasRating = p.rating_count != null;
+  const hasRating = p.rating_count > 0;
 
   document.getElementById('detail-content').innerHTML = `
     <div class="dhead">
@@ -736,7 +862,9 @@ function renderDetail() {
         <h1>${displayName(p.name)}</h1>
         <div class="sub">${esc(p.description || '')}</div>
         <div class="metaline">
-          ${hasRating ? `${starsHtml(p.rating_average)} <span>${(p.rating_average || 0).toFixed(1)} (${p.rating_count})</span><span>·</span>` : ''}
+          ${hasRating
+            ? `${starsHtml(p.rating_average)} <span>${(p.rating_average || 0).toFixed(1)} (${p.rating_count})</span><span>·</span>`
+            : `<a class="firstrev" data-testid="mp-review-first" data-act="jump-write">Write the first review</a><span>·</span>`}
           <span>${esc(catLabel(p.category) || 'Plugin')}</span>
           ${p.download_count != null ? `<span>·</span><span>${p.download_count} downloads</span>` : ''}
         </div>
@@ -770,12 +898,9 @@ function renderDetail() {
 
   const sortSel = document.getElementById('rv-sort');
   if (sortSel) {
-    sortSel.addEventListener('change', async () => {
+    sortSel.addEventListener('change', () => {
       reviewSort = sortSel.value;
-      try {
-        const r = await fetch(`${origin}/api/catalog/${encodeURIComponent(DETAIL.slug)}/${encodeURIComponent(p.name)}/reviews?sort=${reviewSort}`);
-        if (r.ok) { DETAIL.reviews = await r.json(); renderDetail(); }
-      } catch {}
+      reloadReviews();
     });
   }
 }
@@ -872,6 +997,82 @@ async function upgradeAll() {
   }
 }
 
+// ---- writing a review ----
+// Nothing here goes to a third party: submit posts to this plugin's own route,
+// which signs the request with this install's key (reviews.py).
+
+function captureDraft() {
+  const t = document.getElementById('rv-title');
+  const b = document.getElementById('rv-body');
+  if (t) RW.title = t.value;
+  if (b) RW.body = b.value;
+}
+
+function myReview() {
+  const R = DETAIL && DETAIL.reviews;
+  return R ? (R.reviews || []).find((r) => r.is_mine) || null : null;
+}
+
+function openWrite() {
+  if (!RW.open) {
+    const mine = myReview();
+    RW = { rating: mine ? mine.rating : 0, open: true, busy: false, title: null, body: null };
+    renderDetail();
+  }
+  const box = document.getElementById('rv-write');
+  if (box) box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const t = document.getElementById('rv-title');
+  if (t) t.focus();
+}
+
+function reviewTarget() {
+  const mp = curMp();
+  return {
+    marketplace_url: mp && mp.marketplace ? mp.marketplace.url : '',
+    slug: DETAIL.slug,
+    plugin: DETAIL.plugin.name,
+  };
+}
+
+async function submitReview() {
+  captureDraft();
+  const rating = RW.rating || 0;
+  if (rating < 1) { setStatus('Pick a star rating first.'); return; }
+  if (rating <= 2 && !(RW.body || '').trim()) {
+    setStatus('A 1-2 star review needs a written explanation.');
+    return;
+  }
+  RW.busy = true; renderDetail();
+  setStatus('Posting review…');
+  try {
+    await ownApi('POST', '/reviews/write', {
+      ...reviewTarget(), rating, title: RW.title || '', body: RW.body || '',
+    });
+    RW = { rating: 0, open: false, busy: false, title: null, body: null };
+    setStatus('Review posted');
+    await reloadReviews();
+    await load(true); // the plugin's average/count changed
+  } catch (e) {
+    RW.busy = false; renderDetail();
+    setStatus(`Review failed: ${e.message}`);
+  }
+}
+
+async function deleteReview() {
+  if (!myReview()) return;
+  if (!confirm('Delete your review of this plugin?')) return;
+  setStatus('Deleting review…');
+  try {
+    await ownApi('POST', '/reviews/delete', reviewTarget());
+    RW = { rating: 0, open: false, busy: false, title: null, body: null };
+    setStatus('Review deleted');
+    await reloadReviews();
+    await load(true);
+  } catch (e) {
+    setStatus(`Delete failed: ${e.message}`);
+  }
+}
+
 // ---- event delegation ----
 document.getElementById('main').addEventListener('click', (e) => {
   const act = e.target.closest('[data-act]');
@@ -884,6 +1085,21 @@ document.getElementById('main').addEventListener('click', (e) => {
     if (a === 'opencat') return openCat(act.dataset.slug, act.dataset.label);
     if (a === 'src') { CUR = Number(act.dataset.i) || 0; ALL = null; goDiscover(); renderTabs(); return; }
     if (a === 'verlist') { const el = document.getElementById('verlist'); if (el) el.classList.toggle('hidden'); return; }
+    if (a === 'toggle-updates') {
+      const el = document.getElementById('upgrade-list');
+      if (el) el.classList.toggle('hidden');
+      const c = act.querySelector('.caret');
+      if (c) c.textContent = el && el.classList.contains('hidden') ? '▾' : '▴';
+      return;
+    }
+    if (a === 'jump-write' || a === 'rv-open' || a === 'rv-edit') {
+      openWrite();
+      return;
+    }
+    if (a === 'rv-star') { captureDraft(); RW.rating = Number(act.dataset.i) || 0; renderDetail(); return; }
+    if (a === 'rv-cancel') { RW = { rating: 0, open: false, busy: false, title: null, body: null }; renderDetail(); return; }
+    if (a === 'rv-submit') return submitReview();
+    if (a === 'rv-delete') return deleteReview();
     return;
   }
   if (e.target.closest('a')) return; // gear / external links

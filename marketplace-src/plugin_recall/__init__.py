@@ -32,7 +32,6 @@ class RecallPlugin(LunaPlugin):
         version="0.1.0",
         description="Verbatim conversation retrieval (recall_conversation).",
         category="global",
-        license="MIT",
     )
 
     async def on_load(self, ctx: PluginContext) -> None:

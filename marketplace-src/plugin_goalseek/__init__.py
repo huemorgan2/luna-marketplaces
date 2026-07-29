@@ -335,7 +335,6 @@ class GoalseekPlugin(LunaPlugin):
             "definition of done, explicit terminal outcomes, and an honest "
             "evidence trail."
         ),
-        license="MIT",
         # Soft in managed dirs (load-order only) — the code feature-detects the
         # trigger_* tools anyway, so goal-seek still loads without a scheduler.
         depends_on=["plugin-scheduler"],

@@ -3,7 +3,6 @@ version = "0.2.1"
 description = "File storage + a standalone file-browser UI, with agent file tools."
 entry = "plugin_files"
 sdk_version = "0"
-license = "MIT"
 tags = ["files", "storage", "ui"]
 readme = """
 # plugin-files
@@ -18,8 +17,6 @@ served from the plugin's own `ui/` dir. Built against `luna_sdk` v0 — no
 
 Config (env): `LUNA_FILES_ROOT` (default `~/.luna/files`),
 `LUNA_FILES_MAX_SIZE_GB` (5), `LUNA_FILES_MAX_FILE_MB` (50).
-
-Source: https://github.com/huemorgan/plugin-files
 """
 category = "ability"
 

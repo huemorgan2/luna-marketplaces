@@ -1,22 +1,107 @@
-"""plugin-marketplace-ui routes — serves the rich Marketplace pane (iframe).
+"""plugin-marketplace-ui routes — the rich Marketplace pane (iframe) + reviews.
 
-UI only: every catalog/install/upgrade call the pane makes goes to core
-plugin-marketplace APIs at /api/p/plugin-marketplace/*. This router only
-ships the static SPA.
+Catalog/install/upgrade calls the pane makes still go to core
+plugin-marketplace APIs at /api/p/plugin-marketplace/*; this router ships the
+static SPA and one thing of its own: the **review proxy**.
+
+Reviews are written from inside the pane, signed with this install's handshake
+key (see reviews.py), so the owner is never bounced to a website that doesn't
+know them. The browser never sees the tenant or the secret — it posts here,
+and this process signs. Every proxied call is owner-authenticated and the
+target host must be a marketplace the owner actually added.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, Response
+from pydantic import BaseModel
+
+from . import reviews as rv
+
+
+class ReviewListBody(BaseModel):
+    marketplace_url: str
+    slug: str
+    plugin: str
+    sort: str = "helpful"
+
+
+class ReviewWriteBody(BaseModel):
+    marketplace_url: str
+    slug: str
+    plugin: str
+    rating: int
+    title: str = ""
+    body: str = ""
+
+
+class ReviewDeleteBody(BaseModel):
+    marketplace_url: str
+    slug: str
+    plugin: str
 
 
 def register_routes(app, ctx):
+    from luna.auth import get_current_user
+
     router = APIRouter(prefix="/api/p/plugin-marketplace-ui", tags=["marketplace-ui"])
 
     ui_dir = Path(__file__).parent / "ui"
+
+    async def _check_origin(marketplace_url: str) -> None:
+        """Only marketplaces the owner added may be signed for."""
+        try:
+            origin = rv.origin_of(marketplace_url)
+        except rv.ReviewError as e:
+            raise HTTPException(400, str(e)) from e
+        allowed = await rv.trusted_origins(ctx)
+        if allowed and origin not in allowed:
+            raise HTTPException(403, "That marketplace isn't in this Luna's list.")
+
+    def _fail(e: rv.ReviewError):
+        return HTTPException(e.status if 400 <= e.status < 600 else 502, str(e))
+
+    @router.post("/reviews/list")
+    async def reviews_list(body: ReviewListBody, user=Depends(get_current_user)):
+        """Reviews for a plugin, read over the signed channel so the response
+        can say which one is ours."""
+        await _check_origin(body.marketplace_url)
+        path = f"/api/luna/reviews/{body.slug}/{body.plugin}/list"
+        try:
+            return await rv.signed_call(ctx, body.marketplace_url, path, {"sort": body.sort})
+        except rv.ReviewError as e:
+            raise _fail(e) from e
+
+    @router.post("/reviews/write")
+    async def reviews_write(body: ReviewWriteBody, user=Depends(get_current_user)):
+        """Create or replace this install's review."""
+        await _check_origin(body.marketplace_url)
+        if not 1 <= body.rating <= 5:
+            raise HTTPException(400, "Rating must be 1-5.")
+        path = f"/api/luna/reviews/{body.slug}/{body.plugin}"
+        payload = {
+            "rating": body.rating,
+            "title": body.title[:80],
+            "body": body.body[:2000],
+            "author": getattr(user, "username", "") or "",
+            "plugin_version": rv.installed_version(body.plugin),
+        }
+        try:
+            return await rv.signed_call(ctx, body.marketplace_url, path, payload)
+        except rv.ReviewError as e:
+            raise _fail(e) from e
+
+    @router.post("/reviews/delete")
+    async def reviews_delete(body: ReviewDeleteBody, user=Depends(get_current_user)):
+        await _check_origin(body.marketplace_url)
+        path = f"/api/luna/reviews/{body.slug}/{body.plugin}/delete"
+        try:
+            return await rv.signed_call(ctx, body.marketplace_url, path, {})
+        except rv.ReviewError as e:
+            raise _fail(e) from e
 
     # Same cache discipline as core's pane: index.html is never cached hard,
     # and it stamps the plugin version onto asset URLs so every upgrade of

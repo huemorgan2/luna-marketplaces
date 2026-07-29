@@ -4,7 +4,6 @@ version = "0.2.0"
 description = "Connect Luna to Telegram through an official Bot API gateway."
 entry = "plugin_telegram"
 sdk_version = "0"
-license = "MIT"
 category = "connectors"
 icon = "send"
 tags = ["connector", "telegram", "messaging", "bot-api"]

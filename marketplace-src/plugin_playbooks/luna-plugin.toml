@@ -3,7 +3,6 @@ version = "0.2.2"
 description = "Durable multi-step playbooks — Luna builds them, triggers fire them."
 entry = "plugin_playbooks"
 sdk_version = "0"
-license = "MIT"
 category = "automation"
 db_tables = ["playbooks", "playbook_versions", "playbook_runs", "playbook_step_runs", "playbook_drafts"]
 tags = ["playbooks", "workflows", "automation", "triggers"]
@@ -29,7 +28,7 @@ external trigger sources (cron, webhooks, connector events) through the SDK
 + stdlib + SQLAlchemy — zero `luna.*` imports.
 
 Extracted from Luna core in 009.001 (Luna ≥ 0.29). History lives in the main
-luna repo up to 0.29.006; source: https://github.com/huemorgan2/plugin-playbooks
+luna repo up to 0.29.006.
 """
 
 [requires]

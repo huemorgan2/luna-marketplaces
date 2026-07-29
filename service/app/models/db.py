@@ -117,10 +117,11 @@ class Plugin(Base):
     description = Column(Text, default="")
     readme = Column(Text, default="")
     tags = Column(JSON, default=list)
-    license = Column(String, default="MIT")
     icon_url = Column(String, nullable=True)
-    source_url = Column(String, nullable=True)
     latest_version = Column(String, nullable=True)
+    # 009: `license` and `source_url` columns still exist in deployed databases
+    # but are no longer read or written — plugins carry neither a license nor a
+    # repository link. Dropping the columns is deliberately out of scope.
     download_count = Column(Integer, default=0)
     category = Column(String, nullable=True, index=True)  # taxonomy slug, see app/taxonomy.py
     rating_average = Column(Float, default=0.0)  # denormalized from reviews
@@ -211,16 +212,23 @@ class Artifact(Base):
 
 
 class Review(Base):
-    """One review per user per plugin (unique pair). Editable; rating counts once.
+    """One review per author per plugin. Editable; the rating counts once.
 
-    Only certified users (users.certified_at set — they linked a real Luna
-    install) may create reviews. The publisher's own org cannot review its plugin.
+    An author is *either* a certified website user (`user_id`) *or* a Luna
+    install writing from inside its own Marketplace pane (`luna_install_id`,
+    009). The install proves itself with the handshake HMAC, so the install is
+    the identity — no marketplace account is involved. The publisher's own org
+    cannot review its plugin.
     """
     __tablename__ = "reviews"
 
     id = Column(String, primary_key=True, default=gen_uuid)
     plugin_id = Column(String, ForeignKey("plugins.id"), nullable=False, index=True)
-    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=True, index=True)
+    # 009: set instead of user_id when the review came from a Luna install.
+    luna_install_id = Column(String, ForeignKey("luna_installs.id"), nullable=True, index=True)
+    author_display = Column(String, nullable=True)  # shown when there is no user
+    verified_install = Column(Boolean, default=False)  # author had the plugin installed
     rating = Column(Integer, nullable=False)  # 1..5
     title = Column(String, default="")
     body = Column(Text, default="")

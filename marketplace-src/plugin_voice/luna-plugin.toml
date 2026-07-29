@@ -4,7 +4,6 @@ version = "0.3.2"
 description = "Voice conversations that know who is speaking — owner voice imprint, personality-matched voice and fillers, ElevenLabs audio, Luna stays the brain."
 entry = "plugin_voice"
 sdk_version = "0"
-license = "MIT"
 tags = ["voice", "talk", "elevenlabs", "interface"]
 readme = """
 # plugin-voice
@@ -23,8 +22,6 @@ Beyond plugin-talk, this plugin adds:
 
 Requires plugin-vault. Audio flows browser ⇄ ElevenLabs; the imprint check runs
 on lightweight spectral features on your Luna, never leaving it.
-
-Source: https://github.com/huemorgan/plugin-voice
 """
 category = "communication"
 

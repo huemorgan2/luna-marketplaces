@@ -1,9 +1,8 @@
 name = "plugin-marketplace-ui"
-version = "1.0.0"
+version = "1.1.0"
 description = "The full Marketplace experience — discover, curated picks, categories, and reviews."
 entry = "plugin_marketplace_ui"
 sdk_version = "0"
-license = "MIT"
 tags = ["marketplace", "ui", "discover"]
 readme = """
 # Marketplace UI
@@ -17,7 +16,23 @@ plugin replaces that list with the rich storefront — same sidebar item, same
 install and update actions. Disable or uninstall it and the simple list
 returns instantly, so plugin management is never at risk.
 
-UI only: every install/update action goes through Luna's built-in
-plugin-marketplace APIs. Built against `luna_sdk` v0 — no `import luna.*`.
+Reviews are written **here**, in the pane. This plugin speaks the
+marketplace's install handshake itself, signs each review with a key held in
+your Luna's vault, and shows your own review back to you — you are never sent
+to a website that has no idea who you are. Nothing but the review text leaves
+the machine, and the signing key never reaches the browser.
+
+Every install/update action goes through Luna's built-in plugin-marketplace
+APIs. Built against `luna_sdk` v0 — no `import luna.*`.
 """
 category = "ability"
+
+[permissions]
+ui_iframe = true
+# Holds this install's review identity (its id, and the per-marketplace tenant
+# + signing key). Only credentials under `plugin_marketplace_ui.` — the
+# plugin's own namespace — are ever read or written.
+vault_access = true
+# Reviews are posted to the marketplaces you added, and nowhere else: the
+# proxy refuses any host that isn't in Luna's marketplace list.
+egress_hosts = ["the marketplaces you added"]

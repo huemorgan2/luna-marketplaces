@@ -3,7 +3,6 @@ version = "0.1.1"
 description = "Cloudflare infrastructure management — DNS, cache, Workers, KV, Pages."
 entry = "plugin_cloudflare"
 sdk_version = "0"
-license = "MIT"
 tags = ["connector", "cloudflare", "dns", "devops"]
 auto_load = false
 readme = """
@@ -13,8 +12,6 @@ Manage Cloudflare from Luna — DNS zones and records, CDN cache purge, Workers,
 Workers KV, and Pages. Requires a Cloudflare API token + account ID, pasted in
 the connector's settings (served as a themed iframe from the managed dir).
 Ships OFF by default.
-
-Source: https://github.com/huemorgan/plugin-cloudflare
 """
 category = "development"
 

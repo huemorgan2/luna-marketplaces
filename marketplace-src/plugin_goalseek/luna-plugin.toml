@@ -6,7 +6,6 @@ version = "0.6.0"
 description = "Durable, governed goal lifecycles: concrete outcomes with a definition of done, explicit terminal outcomes, and an honest evidence trail."
 entry = "plugin_goalseek"
 sdk_version = "0"
-license = "MIT"
 tags = ["goals", "automation", "autonomy"]
 readme = """
 # plugin-goalseek
@@ -56,8 +55,6 @@ end-states and the outcome. Namespaced facts (`contact-jane/working_hours`)
 also land on domain pages (`contact-jane` § working_hours), and the policy
 gate's `requires_facts` reads those pages back — knowledge learned by one
 goal tunes the next.
-
-Source: https://github.com/huemorgan/plugin-goalseek
 """
 
 depends_on = ["plugin-scheduler"]

@@ -29,7 +29,6 @@ class MCPPlugin(LunaPlugin):
         category="connectors",
         system_app=False,
         critical=False,
-        license="MIT",
         depends_on=["plugin-vault"],
         db_tables=["plugin_mcp_servers", "plugin_mcp_tools"],
         routes_module="routes",

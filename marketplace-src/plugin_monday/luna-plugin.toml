@@ -3,7 +3,6 @@ version = "0.1.1"
 description = "Monday.com board and item management via GraphQL."
 entry = "plugin_monday"
 sdk_version = "0"
-license = "MIT"
 tags = ["connector", "monday", "project-management", "oauth"]
 readme = """
 # plugin-monday
@@ -15,8 +14,6 @@ connect/callback flow and token persistence run from the managed dir
 
 Requires `LUNA_MONDAY_CLIENT_ID` + `LUNA_MONDAY_CLIENT_SECRET` env vars (your
 Monday app credentials).
-
-Source: https://github.com/huemorgan/plugin-monday
 """
 category = "connectivity"
 

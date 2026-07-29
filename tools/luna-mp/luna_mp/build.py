@@ -185,7 +185,6 @@ def build_marketplace(
                 latest_version=manifest.version,
                 description=manifest.description,
                 tags=manifest.tags,
-                license=manifest.license,
             )
         )
 

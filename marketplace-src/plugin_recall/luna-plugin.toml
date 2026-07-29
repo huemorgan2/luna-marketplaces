@@ -3,7 +3,6 @@ version = "0.1.1"
 description = "Verbatim conversation recall — search and quote past messages."
 entry = "plugin_recall"
 sdk_version = "0"
-license = "MIT"
 category = "knowledge"
 default_enabled = true
 tags = ["recall", "memory", "conversation"]
@@ -19,8 +18,6 @@ Read-only and ungated (`auto_approve`). Built on `luna_sdk` v0 with **enabler
 E6** — reads history through `ctx.conversations` and the active conversation via
 `ctx.current_conversation_id`, never importing core models or runtime globals.
 No `import luna.*`.
-
-Source: https://github.com/huemorgan2/plugin-recall
 """
 
 [requires]

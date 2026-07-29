@@ -32,7 +32,6 @@ class InterviewPlugin(LunaPlugin):
         version="0.1.1",
         description="Adaptive knowledge-elicitation interviews → structured briefs.",
         category="global",
-        license="MIT",
         db_tables=[t.name for t in ALL_TABLES],
         routes_module="routes",
         sidebar_sections=[

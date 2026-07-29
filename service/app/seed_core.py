@@ -146,6 +146,21 @@ def _tools_from_manifest(manifest: dict) -> list[dict]:
     return manifest.get("tools", []) or []
 
 
+def _apply_permissions(plugin: Plugin, manifest: dict) -> None:
+    """Mirror the toml's `[permissions]` onto the catalog row.
+
+    Repo-seeded plugins used to skip this, so a plugin that reads the vault or
+    talks to a host showed an empty Access panel — the pane would under-report
+    what it does. `permissions.ui_iframe` etc. are declarative: the marketplace
+    reports them, Luna asks the owner at install.
+    """
+    perms = manifest.get("permissions") or {}
+    plugin.requires_ui_iframe = bool(perms.get("ui_iframe", False))
+    plugin.requires_settings_tab = bool(perms.get("settings_tab", False))
+    plugin.requires_vault_access = bool(perms.get("vault_access", False))
+    plugin.requires_egress = list(perms.get("egress_hosts") or [])
+
+
 async def _seed_media(db: AsyncSession, plugin: Plugin, pkg_dir: Path) -> None:
     """Sync `plugin_media` rows with `<pkg>/media/` files (not shipped in the
     artifact — packaging excludes the dir). Filename → kind: `icon.*`,
@@ -211,7 +226,6 @@ async def _upsert_plugin(db: AsyncSession, mp: Marketplace, manifest: dict, sha2
             description=manifest.get("description", ""),
             readme=manifest.get("readme", ""),
             tags=manifest.get("tags", []),
-            license=manifest.get("license", "MIT"),
             requires_tools=len(tools) > 0,
             tool_count=len(tools),
             tool_policies=tools,
@@ -219,6 +233,7 @@ async def _upsert_plugin(db: AsyncSession, mp: Marketplace, manifest: dict, sha2
             created_at=now_ts(),
             updated_at=now_ts(),
         )
+        _apply_permissions(plugin, manifest)
         db.add(plugin)
         await db.flush()
     else:
@@ -231,6 +246,7 @@ async def _upsert_plugin(db: AsyncSession, mp: Marketplace, manifest: dict, sha2
         cat = taxonomy.normalize(manifest.get("category"))
         if cat:
             plugin.category = cat
+        _apply_permissions(plugin, manifest)
         plugin.updated_at = now_ts()
 
     if pkg_dir is not None:

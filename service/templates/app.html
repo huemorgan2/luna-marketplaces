@@ -706,7 +706,7 @@
         const p = officialPlugins.find(x => x.name === pluginName);
         if (!p) return;
         // Re-publish the plugin to this marketplace (simplified — copies manifest)
-        const manifest = {name: p.name, namespace: currentMp.slug, version: p.latest_version, description: p.description, tags: p.tags, license: p.license, compat: {sdk: "^1.0", requires: {tools: ">=1"}}, permissions: {tools: p.tool_policies, egress_hosts: p.requires_egress, vault_access: p.requires_vault_access, ui_iframe: p.requires_ui_iframe, settings_tab: p.requires_settings_tab}};
+        const manifest = {name: p.name, namespace: currentMp.slug, version: p.latest_version, description: p.description, tags: p.tags, compat: {sdk: "^1.0", requires: {tools: ">=1"}}, permissions: {tools: p.tool_policies, egress_hosts: p.requires_egress, vault_access: p.requires_vault_access, ui_iframe: p.requires_ui_iframe, settings_tab: p.requires_settings_tab}};
         const formData = new FormData();
         formData.append('manifest', JSON.stringify(manifest));
         formData.append('artifact', new Blob(['placeholder'], {type:'application/zip'}), 'artifact.zip');
@@ -917,8 +917,6 @@ curl -X POST ${window.location.origin}/api/marketplaces/${currentMp.slug}/upload
                 <h4>Edit metadata</h4>
                 <div class="input-group"><label>Description</label><textarea class="input" id="edit-desc" rows="3">${esc(p.description)}</textarea></div>
                 <div class="input-group"><label>Tags (comma-separated)</label><input class="input" id="edit-tags" value="${esc((p.tags||[]).join(', '))}"></div>
-                <div class="input-group"><label>License</label><input class="input" id="edit-license" value="${esc(p.license)}"></div>
-                <div class="input-group"><label>Source URL</label><input class="input" id="edit-source" value="${esc(p.source_url||'')}"></div>
                 <button class="btn btn-primary btn-sm" onclick="savePluginMeta()">Save changes</button>
             </div>
             <div class="drawer-section">
@@ -935,11 +933,9 @@ curl -X POST ${window.location.origin}/api/marketplaces/${currentMp.slug}/upload
             <div class="drawer-section">
                 <h4>Details</h4>
                 <dl class="meta-grid">
-                    <dt>License</dt><dd>${esc(p.license)||'—'}</dd>
                     <dt>Downloads</dt><dd>${(p.download_count||0).toLocaleString()}</dd>
                     <dt>Uploaded</dt><dd>${fmtDate(p.created_at)}</dd>
                     <dt>Last updated</dt><dd>${fmtDate(p.updated_at)}</dd>
-                    <dt>Source</dt><dd>${p.source_url?`<a href="${esc(p.source_url)}" target="_blank" style="color:var(--accent)">${esc(p.source_url)}</a>`:'—'}</dd>
                 </dl>
             </div>
             <div class="drawer-section">
@@ -957,8 +953,6 @@ curl -X POST ${window.location.origin}/api/marketplaces/${currentMp.slug}/upload
         const body = {
             description: document.getElementById('edit-desc').value,
             tags: document.getElementById('edit-tags').value.split(',').map(t=>t.trim()).filter(Boolean),
-            license: document.getElementById('edit-license').value,
-            source_url: document.getElementById('edit-source').value || null,
         };
         const res = await api('PATCH', `/api/marketplaces/${currentMp.slug}/plugins/${currentPluginName}`, body);
         if (res && res.id) { await refreshAfterPluginChange(); openPluginDrawer(currentPluginName); }

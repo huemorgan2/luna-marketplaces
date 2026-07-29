@@ -51,7 +51,6 @@ class PluginCompat(BaseModel):
 class PluginProvenance(BaseModel):
     """Origin and trust metadata for a plugin."""
 
-    source: str | None = Field(default=None, description="Source repo URL")
     publisher_key: str | None = Field(
         default=None, description="Ed25519 public key of the publisher"
     )
@@ -83,7 +82,6 @@ class PublishedManifest(BaseModel):
     namespace: str
     version: str
     description: str = ""
-    license: Literal["MIT", "Commercial"] = "MIT"
     requires_entitlement: str | None = None
 
     compat: PluginCompat
@@ -127,7 +125,6 @@ class IndexEntry(BaseModel):
     latest_version: str
     description: str = ""
     tags: list[str] = Field(default_factory=list)
-    license: str = "MIT"
 
 
 class MarketplaceIndex(BaseModel):

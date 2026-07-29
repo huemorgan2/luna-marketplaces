@@ -42,9 +42,7 @@ def plugin_response(p: Plugin, mp: Marketplace, media: list[PluginMedia] | None 
         description=p.description,
         readme=p.readme or "",
         tags=p.tags or [],
-        license=p.license,
         icon_url=p.icon_url,
-        source_url=p.source_url,
         latest_version=p.latest_version,
         download_count=p.download_count,
         created_at=p.created_at,
@@ -196,9 +194,7 @@ async def _ingest_version(
             description=manifest_data.get("description", ""),
             readme=manifest_data.get("readme", ""),
             tags=manifest_data.get("tags", []),
-            license=manifest_data.get("license", "MIT"),
             icon_url=manifest_data.get("icon"),
-            source_url=manifest_data.get("provenance", {}).get("source") if isinstance(manifest_data.get("provenance"), dict) else None,
             requires_tools=len(tools) > 0,
             requires_ui_iframe=permissions.get("ui_iframe", False),
             requires_settings_tab=permissions.get("settings_tab", False),
@@ -260,7 +256,6 @@ async def catalog(
     search: str | None = Query(None),
     tags: str | None = Query(None),
     category: str | None = Query(None),
-    license_filter: str | None = Query(None, alias="license"),
     requires_ui: bool | None = Query(None),
     requires_vault: bool | None = Query(None),
     sort: str = Query("name"),  # name | rating | downloads | updated
@@ -285,8 +280,6 @@ async def catalog(
         )
     if category:
         query = query.where(Plugin.category == category)
-    if license_filter:
-        query = query.where(Plugin.license == license_filter)
     if requires_ui is not None:
         query = query.where(Plugin.requires_ui_iframe == requires_ui)
     if requires_vault is not None:
@@ -487,7 +480,7 @@ async def update_plugin(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Edit a plugin's catalog metadata (description, tags, license, links)."""
+    """Edit a plugin's catalog metadata (description, tags, category, icon)."""
     mp, p = await _get_plugin_for_editor(mp_slug, plugin_name, user, db)
 
     fields = data.model_dump(exclude_unset=True)
