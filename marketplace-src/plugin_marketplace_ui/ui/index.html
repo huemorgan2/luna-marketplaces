@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Marketplace — Luna</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <header id="header">
+      <div class="wrap hbar">
+        <div class="logo" id="logo"><span class="luna-text">Luna</span><span class="mp" id="mp-name">-Marketplace</span></div>
+        <div class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+          <input id="q" placeholder="Search plugins…" autocomplete="off">
+        </div>
+        <button id="btn-refresh" class="hbtn" title="Refresh">Refresh</button>
+      </div>
+    </header>
+    <div id="main">
+      <div class="wrap">
+        <div id="srctabs" class="srctabs hidden"></div>
+        <div id="banner-slot"></div>
+        <div id="empty" class="placeholder hidden">
+          No marketplaces yet. Add one in <strong>Settings → Marketplaces</strong>.
+        </div>
+
+        <div id="discover">
+          <div class="pagetitle">Discover</div>
+          <div class="heroes" id="heroes"></div>
+          <div id="essentials"></div>
+          <div class="bigheroes" id="bigheroes"></div>
+          <div id="toppicks"></div>
+          <div id="catsections"></div>
+          <div id="flatlist"></div>
+        </div>
+
+        <div id="catpage" class="hidden">
+          <span class="crumb" id="cat-back">← Discover</span>
+          <div class="pagetitle" id="cat-title"></div>
+          <div class="rows" id="cat-rows"></div>
+          <button class="more hidden" id="cat-more">Show more</button>
+          <div class="emptymsg hidden" id="cat-empty">Nothing here yet.</div>
+        </div>
+
+        <div id="detail" class="hidden" data-testid="mp-detail">
+          <span class="crumb" id="detail-back">← Back</span>
+          <div id="detail-content"></div>
+        </div>
+      </div>
+    </div>
+    <footer id="status-bar"><span id="status-text">Loading…</span><span class="pane-ver" title="Marketplace UI plugin version">plugin-ui v__MP_UI_VERSION__</span></footer>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

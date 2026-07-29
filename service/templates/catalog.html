@@ -158,6 +158,11 @@
   </div>
 </main>
 
+<footer style="border-top:1px solid var(--hairline);margin-top:56px;padding:18px 24px;color:var(--dim);font-size:12px;display:flex;justify-content:space-between;gap:12px;max-width:1100px;margin-left:auto;margin-right:auto">
+  <span>Luna Marketplace</span>
+  <span title="Marketplace service version">v{{ service_version }}</span>
+</footer>
+
 <script>
 const mpSlug = location.pathname.split('/browse/')[1]?.split('/')[0] || 'official';
 const token = localStorage.getItem('mp_token');

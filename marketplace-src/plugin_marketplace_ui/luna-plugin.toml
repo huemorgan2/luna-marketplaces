@@ -1,0 +1,23 @@
+name = "plugin-marketplace-ui"
+version = "1.0.0"
+description = "The full Marketplace experience — discover, curated picks, categories, and reviews."
+entry = "plugin_marketplace_ui"
+sdk_version = "0"
+license = "MIT"
+tags = ["marketplace", "ui", "discover"]
+readme = """
+# Marketplace UI
+
+The full Marketplace experience for Luna: discover page with featured heroes,
+curated Essentials and Top picks, category browsing, plugin detail pages with
+screenshots, ratings and reviews.
+
+Luna ships a simple built-in plugin list that always works. Installing this
+plugin replaces that list with the rich storefront — same sidebar item, same
+install and update actions. Disable or uninstall it and the simple list
+returns instantly, so plugin management is never at risk.
+
+UI only: every install/update action goes through Luna's built-in
+plugin-marketplace APIs. Built against `luna_sdk` v0 — no `import luna.*`.
+"""
+category = "ability"

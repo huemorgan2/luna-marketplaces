@@ -46,10 +46,12 @@ async def lifespan(app: FastAPI):
     yield
 
 
+from app import __version__
+
 app = FastAPI(
     title="Luna Marketplaces",
     description="Plugin marketplace service for the Luna agent platform",
-    version="0.2.0",
+    version=__version__,
     lifespan=lifespan,
 )
 
@@ -89,7 +91,9 @@ async def home(request: Request):
 
 @app.get("/browse/{mp_slug}", response_class=HTMLResponse)
 async def marketplace_catalog(request: Request, mp_slug: str):
-    return templates.TemplateResponse(request=request, name="catalog.html")
+    return templates.TemplateResponse(
+        request=request, name="catalog.html", context={"service_version": __version__}
+    )
 
 
 @app.get("/browse/{mp_slug}/plugin/{plugin_name}", response_class=HTMLResponse)
@@ -128,4 +132,4 @@ async def dev_kit():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "luna-marketplaces", "version": "0.2.0"}
+    return {"status": "ok", "service": "luna-marketplaces", "version": __version__}
