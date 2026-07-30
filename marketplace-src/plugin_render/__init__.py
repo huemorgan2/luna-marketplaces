@@ -29,7 +29,7 @@ VAULT_KEY = "plugin_render.api_key"
 class RenderPlugin(LunaPlugin):
     manifest = PluginManifest(
         name="plugin-render",
-        version="0.1.0",
+        version="0.1.1",
         description="Render.com service management — deploys, env vars, logs, and lifecycle control.",
         category="connectors",
         depends_on=["plugin-vault"],

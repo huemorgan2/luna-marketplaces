@@ -550,11 +550,13 @@ function renderBanner() {
   if (!n) { slot.innerHTML = ''; return; }
   const rows = ready.map((r) => upgradeRowHtml(r, true)).join('')
     + blocked.map((r) => upgradeRowHtml(r, false)).join('');
+  // Open by default: the names and their per-plugin Update links ARE the
+  // message. A collapsed list read as a bare count, and nobody found the caret.
   slot.innerHTML = `<div class="upgrade-banner" data-testid="mp-upgrade-banner">
-    <span class="upgrade-banner-text" data-act="toggle-updates" data-testid="mp-upgrade-toggle">${n} update${n === 1 ? '' : 's'} available<i class="caret">▾</i></span>
+    <span class="upgrade-banner-text" data-act="toggle-updates" data-testid="mp-upgrade-toggle">${n} update${n === 1 ? '' : 's'} available<i class="caret">▴</i></span>
     <button class="upd" id="btn-update-all" data-act="update-all" data-testid="mp-update-all">Update all (${n})</button>
   </div>
-  <div class="upgrade-list hidden" id="upgrade-list" data-testid="mp-upgrade-list">${rows}</div>`;
+  <div class="upgrade-list" id="upgrade-list" data-testid="mp-upgrade-list">${rows}</div>`;
 }
 
 function renderDiscover() {

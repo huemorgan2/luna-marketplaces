@@ -15,7 +15,25 @@ from __future__ import annotations
 
 from luna_sdk import LunaPlugin, PluginContext, PluginManifest, SidebarSection
 
-__version__ = "1.1.0"
+
+def _pkg_version(default: str = "1.2.1") -> str:
+    """The version of record is `luna-plugin.toml` — that's what the
+    marketplace publishes and what upgrades compare against. Read it here so
+    the manifest can never drift from the package: a stale literal made every
+    update "succeed" (new code on disk, new pane) while the running manifest
+    kept reporting the old number, so the catalog offered the same update
+    forever and the banner never cleared."""
+    try:
+        import tomllib
+        from pathlib import Path
+
+        data = tomllib.loads((Path(__file__).resolve().parent / "luna-plugin.toml").read_text("utf-8"))
+        return str(data.get("version") or "").strip() or default
+    except Exception:  # noqa: BLE001 — never let packaging trivia break the load
+        return default
+
+
+__version__ = _pkg_version()
 
 
 class MarketplaceUiPlugin(LunaPlugin):

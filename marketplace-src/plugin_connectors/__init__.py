@@ -110,7 +110,7 @@ def _tool_policy(t: ProviderToolDef) -> tuple[str, str]:
 class ConnectorsPlugin(LunaPlugin):
     manifest = PluginManifest(
         name="plugin-connectors",
-        version="0.1.0",
+        version="0.1.1",
         description=(
             "Connector aggregator — connect hundreds of platforms (via Composio) "
             "with managed OAuth, agent tools, and event triggers."

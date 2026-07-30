@@ -29,7 +29,7 @@ _CAPABILITY_NOTE = (
 class RecallPlugin(LunaPlugin):
     manifest = PluginManifest(
         name="plugin-recall",
-        version="0.1.0",
+        version="0.1.1",
         description="Verbatim conversation retrieval (recall_conversation).",
         category="global",
     )

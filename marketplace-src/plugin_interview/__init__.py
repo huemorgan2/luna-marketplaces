@@ -29,7 +29,7 @@ log = logging.getLogger("plugin-interview")
 class InterviewPlugin(LunaPlugin):
     manifest = PluginManifest(
         name="plugin-interview",
-        version="0.1.1",
+        version="0.1.2",
         description="Adaptive knowledge-elicitation interviews → structured briefs.",
         category="global",
         db_tables=[t.name for t in ALL_TABLES],

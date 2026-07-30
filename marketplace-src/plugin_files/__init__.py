@@ -19,7 +19,7 @@ log = logging.getLogger("plugin-files")
 class FilesPlugin(LunaPlugin):
     manifest = PluginManifest(
         name="plugin-files",
-        version="0.2.0",
+        version="0.2.1",
         description="File storage and browser.",
         category="system",
         sidebar_sections=[

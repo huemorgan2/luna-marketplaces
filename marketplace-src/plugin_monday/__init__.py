@@ -31,7 +31,7 @@ VAULT_ACCOUNT_KEY = "plugin_monday.account_id"
 class MondayPlugin(LunaPlugin):
     manifest = PluginManifest(
         name="plugin-monday",
-        version="0.1.0",
+        version="0.1.1",
         description="Monday.com board and item management via GraphQL.",
         category="connectors",
         depends_on=["plugin-vault"],
