@@ -8,14 +8,16 @@ on:
   push:
     branches: [main]
     paths:
-      - 'luna/ui/**'
+      - 'luna'
       - 'marketplace-src/plugin_chat_ui/**'
       - 'tools/chat-ui-gate.mjs'
+      - '.github/workflows/chat-ui-gate.yml'
   pull_request:
     paths:
-      - 'luna/ui/**'
+      - 'luna'
       - 'marketplace-src/plugin_chat_ui/**'
       - 'tools/chat-ui-gate.mjs'
+      - '.github/workflows/chat-ui-gate.yml'
 
 jobs:
   gate:
@@ -23,15 +25,32 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-        with:
-          # ui-src imports the live core sources via the @luna alias
-          # (../../../luna/ui/src), so the luna submodule must be present.
-          submodules: true
+      # ui-src imports the live core sources via the @luna alias
+      # (../../../luna/ui/src), so the luna submodule must be present. The
+      # submodule repo (huemorgan/luna) is private under another account, so
+      # the default token can't clone it — use the read-only deploy key.
+      - name: Checkout luna submodule (deploy key)
+        env:
+          DEPLOY_KEY: ${{ secrets.LUNA_SUBMODULE_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git config --global url."git@github.com:".insteadOf "https://github.com/"
+          git submodule update --init --depth 1 luna
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: marketplace-src/plugin_chat_ui/ui-src/package-lock.json
+      # tsc type-checks the @luna sources transitively; their bare imports
+      # resolve against core ui's node_modules.
+      - name: Install core UI deps
+        working-directory: luna/ui
+        run: |
+          corepack enable
+          corepack pnpm install --frozen-lockfile
       - run: node tools/chat-ui-gate.mjs
       - run: npm test
         working-directory: marketplace-src/plugin_chat_ui/ui-src
