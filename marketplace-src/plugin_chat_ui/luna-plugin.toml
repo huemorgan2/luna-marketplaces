@@ -1,0 +1,29 @@
+name = "plugin-chat-ui"
+version = "0.1.0"
+description = "Luna's full chat experience — rich messages, inline approvals, secret forms, embeds, and debug mode."
+entry = "plugin_chat_ui"
+sdk_version = "0"
+tags = ["chat", "ui", "core"]
+readme = """
+# Chat UI
+
+Luna's product chat, as a plugin.
+
+Luna ships a tiny built-in debug chat that always works. This plugin replaces
+it with the full experience: rich markdown with streaming, inline approval
+cards you can decide without leaving the conversation, secret request forms
+that store straight to the vault, chart embeds, playbook-sourced message
+styling, a context-window meter, a model picker in the composer, transcript
+copy, and a hidden debug mode (Cmd+D) that shows every event under the turn.
+
+It mounts natively in Luna's own UI — no iframe, no seams: same look, focus,
+scrolling, and shortcuts as the shell itself. Disable or uninstall it and the
+basic debug chat returns instantly, so talking to your agent is never at risk.
+
+Effectively core: pre-installed on new Lunas and updated through the
+marketplace, so chat improvements arrive in minutes, not Luna releases.
+"""
+category = "ability"
+
+[permissions]
+ui_iframe = false

@@ -1,0 +1,37 @@
+# Release gate for the core ↔ plugin-chat-ui React coupling (plan 008).
+# A core UI change that bumps the React major or renames the window.LunaReact*
+# exposure must republish plugin-chat-ui in the same breath — this makes the
+# breakage loud at PR time instead of a silent BasicChat fallback in prod.
+name: chat-ui-gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'luna/ui/**'
+      - 'marketplace-src/plugin_chat_ui/**'
+      - 'tools/chat-ui-gate.mjs'
+  pull_request:
+    paths:
+      - 'luna/ui/**'
+      - 'marketplace-src/plugin_chat_ui/**'
+      - 'tools/chat-ui-gate.mjs'
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # ui-src imports the live core sources via the @luna alias
+          # (../../../luna/ui/src), so the luna submodule must be present.
+          submodules: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: marketplace-src/plugin_chat_ui/ui-src/package-lock.json
+      - run: node tools/chat-ui-gate.mjs
+      - run: npm test
+        working-directory: marketplace-src/plugin_chat_ui/ui-src

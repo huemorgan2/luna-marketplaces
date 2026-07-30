@@ -1,0 +1,18 @@
+{
+  "label": "basic",
+  "richMounted": false,
+  "basicVisible": true,
+  "chatBundle": null,
+  "reloadToComposerMs": {
+    "runs": [
+      817,
+      812,
+      845,
+      818,
+      820
+    ],
+    "median": 818,
+    "min": 812,
+    "max": 845
+  }
+}

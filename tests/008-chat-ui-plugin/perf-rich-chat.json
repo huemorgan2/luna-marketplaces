@@ -1,0 +1,22 @@
+{
+  "label": "rich",
+  "richMounted": true,
+  "basicVisible": false,
+  "chatBundle": {
+    "transferSize": 0,
+    "encodedBodySize": 88122,
+    "durationMs": 0
+  },
+  "reloadToComposerMs": {
+    "runs": [
+      366,
+      316,
+      327,
+      222,
+      351
+    ],
+    "median": 327,
+    "min": 222,
+    "max": 366
+  }
+}

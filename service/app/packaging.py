@@ -53,10 +53,13 @@ def package_dir_to_zip(package_dir: Path) -> bytes:
         p for p in package_dir.rglob("*")
         if p.is_file()
         and "__pycache__" not in p.parts
+        and "node_modules" not in p.parts
         and p.suffix != ".pyc"
-        # `media/` holds marketing images seeded into plugin_media — never
-        # shipped inside the artifact (would bloat installs + churn the sha256).
-        and (len(p.relative_to(package_dir).parts) < 2 or p.relative_to(package_dir).parts[0] != "media")
+        # `media/` holds marketing images seeded into plugin_media, `ui-src/`
+        # holds frontend build sources (the built bundle ships from `ui/`) —
+        # neither belongs in the artifact (bloat + sha256 churn).
+        and (len(p.relative_to(package_dir).parts) < 2
+             or p.relative_to(package_dir).parts[0] not in ("media", "ui-src"))
     )
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
