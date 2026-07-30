@@ -390,10 +390,26 @@ function fallbackNote(name) {
     : '';
 }
 
-function section(title, plugins, origin, more) {
+function section(title, plugins, origin, tail) {
   if (!plugins || !plugins.length) return '';
-  return `<div class="shead"><h2>${esc(title)}</h2>${more || ''}</div>
-    <div class="cards">${plugins.map((p) => card(p, origin)).join('')}</div>`;
+  return `<div class="shead"><h2>${esc(title)}</h2></div>
+    <div class="cards">${plugins.map((p) => card(p, origin)).join('')}${tail || ''}</div>`;
+}
+
+// The tile that stands in for a "More X »" link: it sits in the grid as a
+// fourth card, shows the icons of what you'd find behind it, and says how many.
+// `preview` may be short or empty on older marketplaces — the count still holds.
+function moreCard(cat, origin) {
+  const n = (cat.total || 0) - (cat.plugins || []).length;
+  if (n < 1) return '';
+  const preview = (cat.more || []).slice(0, 3);
+  const icons = preview.map((p) => `<div class="ic">${iconHtml(p, origin, 20)}</div>`).join('');
+  const label = (cat.label || '').toLowerCase();
+  return `<div class="card morecard" data-act="opencat" data-slug="${esc(cat.slug)}" data-label="${esc(cat.label)}"
+      data-testid="mp-more-${esc(cat.slug)}">
+    <div class="moreicons">${icons}</div>
+    <div class="moretx">${n} more ${esc(label)} plugin${n === 1 ? '' : 's'}</div>
+  </div>`;
 }
 
 function rowHtml(p, origin) {
@@ -559,10 +575,8 @@ function renderDiscover() {
     document.getElementById('essentials').innerHTML = section('Essentials', rich.essentials, origin);
     document.getElementById('bigheroes').innerHTML = rich.features.map((p) => heroCard(p, origin, 'big')).join('');
     document.getElementById('toppicks').innerHTML = section('Top picks', rich.top_picks, origin);
-    document.getElementById('catsections').innerHTML = (rich.categories || []).map((c) => {
-      const more = c.total >= 4 ? `<a data-act="opencat" data-slug="${esc(c.slug)}" data-label="${esc(c.label)}">More ${esc(c.label)} »</a>` : '';
-      return section(c.label, c.plugins, origin, more);
-    }).join('');
+    document.getElementById('catsections').innerHTML = (rich.categories || [])
+      .map((c) => section(c.label, c.plugins, origin, moreCard(c, origin))).join('');
     document.getElementById('flatlist').innerHTML = '';
   } else {
     // Flat fallback: cards straight from Luna's catalog (no marketplace JSON).

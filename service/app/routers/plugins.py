@@ -386,6 +386,9 @@ async def discover(
             "label": label,
             "total": len(members),
             "plugins": [card(p) for p in members[:3]],
+            # Icons for the "N more …" tile the client draws in place of a
+            # section link — the next few, so the tile shows what it opens.
+            "more": [card(p) for p in members[3:6]],
         })
 
     return {
