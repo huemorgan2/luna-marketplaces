@@ -2331,6 +2331,8 @@ function ComposerModelSelect() {
   const [chains, setChains] = useState<ModelChain[] | null>(null)
   const [catalog, setCatalog] = useState<CatalogEntry[] | null>(null)
   const [configured, setConfigured] = useState<string[]>([])
+  // 064: per-model context-window caps ("provider:model" → tokens).
+  const [windowCaps, setWindowCaps] = useState<Record<string, number>>({})
   const [saving, setSaving] = useState(false)
 
   const load = useCallback(() => {
@@ -2340,6 +2342,7 @@ function ComposerModelSelect() {
       .then((c) => {
         setCatalog(c.catalog.reasoning)
         setConfigured(c.configured_providers)
+        setWindowCaps(c.window_caps ?? {})
       })
       .catch(() => setCatalog([]))
   }, [])
@@ -2405,12 +2408,32 @@ function ComposerModelSelect() {
     }
   }
 
+  // 064: persist a per-model window cap (null clears back to Max). Optimistic;
+  // caps-only write (empty chain) leaves the chain untouched.
+  async function onWindowCapChange(fqn: string, cap: number | null) {
+    const prev = windowCaps
+    setWindowCaps((cs) => {
+      const next = { ...cs }
+      if (cap === null) delete next[fqn]
+      else next[fqn] = cap
+      return next
+    })
+    try {
+      const res = await api.setModelChain('reasoning', [], undefined, { [fqn]: cap })
+      if (!res.updated) setWindowCaps(prev)
+    } catch {
+      setWindowCaps(prev)
+    }
+  }
+
   return (
     <ModelPickerMenu
       options={options}
       value={currentHead}
       disabled={saving}
       onChange={(fqn) => void onChange(fqn)}
+      windowCaps={windowCaps}
+      onWindowCapChange={(fqn, cap) => void onWindowCapChange(fqn, cap)}
       testId="composer-model-select"
     />
   )
