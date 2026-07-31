@@ -351,23 +351,23 @@
                             <code>Authorization: Bearer</code> header. Scoped to this marketplace only.
                             You can keep several active at once (e.g. one per machine or pipeline).
                         </p>
-                        <div id="publish-token-list" style="margin-bottom:1rem;"></div>
-                        <div style="display:flex; gap:0.5rem;">
-                            <input class="input" id="publish-token-name" placeholder="Token name (e.g. CI deploy)" style="max-width:280px;">
-                            <button class="btn btn-primary btn-sm" onclick="generatePublishToken()">Generate token</button>
-                        </div>
-                        <div id="publish-token-reveal" style="display:none; margin-top:1rem;">
+                        <div id="publish-token-reveal" style="display:none; margin-bottom:1rem; padding:1rem; border:1px solid #e0a020; border-radius:8px; background:rgba(224,160,32,0.06);">
                             <div style="font-size:0.8rem; color:#e0a020; margin-bottom:0.5rem;">
-                                ⚠️ Shown once — copy and store it now.
+                                ⚠️ Your new token — shown once, copy and store it now.
                             </div>
                             <div style="display:flex; gap:0.5rem;">
-                                <input class="input" id="publish-token-value" readonly style="font-family:monospace; font-size:0.8rem; flex:1;">
-                                <button class="btn btn-secondary btn-sm" onclick="copyPublishToken()" id="publish-token-copy-btn">Copy</button>
+                                <input class="input" id="publish-token-value" readonly onclick="this.select()" style="font-family:monospace; font-size:0.8rem; flex:1;">
+                                <button class="btn btn-primary btn-sm" onclick="copyPublishToken()" id="publish-token-copy-btn" style="white-space:nowrap;">📋 Copy</button>
                             </div>
                             <div class="input-group" style="margin-top:0.75rem;">
                                 <label>Usage</label>
                                 <pre class="input" id="publish-token-usage" style="white-space:pre; font-family:monospace; font-size:0.72rem; padding:1rem; line-height:1.6; overflow-x:auto;"></pre>
                             </div>
+                        </div>
+                        <div id="publish-token-list" style="margin-bottom:1rem;"></div>
+                        <div style="display:flex; gap:0.5rem;">
+                            <input class="input" id="publish-token-name" placeholder="Token name (e.g. CI deploy)" style="max-width:280px;">
+                            <button class="btn btn-primary btn-sm" onclick="generatePublishToken()">Generate token</button>
                         </div>
                     </div>
                 </div>
@@ -762,8 +762,6 @@
         if (!res.ok) { const e = await res.json().catch(()=>({})); alert(e.detail || 'Failed to generate token'); return; }
         const data = await res.json();
         nameInput.value = '';
-        const info = await api('GET', `/api/marketplaces/${currentMp.slug}/publish-token`);
-        renderPublishTokens(info && info.tokens || []);
         document.getElementById('publish-token-value').value = data.token;
         document.getElementById('publish-token-usage').textContent =
 `# publish_plugin.sh / CI
@@ -773,8 +771,19 @@ export LUNA_MP_TOKEN=${data.token}
 curl -X POST ${window.location.origin}/api/marketplaces/${currentMp.slug}/upload \\
   -H "Authorization: Bearer ${data.token}" \\
   -F "artifact=@my-plugin.zip"`;
-        document.getElementById('publish-token-reveal').style.display = 'block';
-        document.getElementById('publish-token-copy-btn').textContent = 'Copy';
+        const reveal = document.getElementById('publish-token-reveal');
+        reveal.style.display = 'block';
+        reveal.scrollIntoView({behavior: 'smooth', block: 'center'});
+        document.getElementById('publish-token-value').select();
+        // Try to copy immediately; fall back to the visible Copy button.
+        try {
+            await navigator.clipboard.writeText(data.token);
+            document.getElementById('publish-token-copy-btn').textContent = 'Copied ✓';
+        } catch (e) {
+            document.getElementById('publish-token-copy-btn').textContent = '📋 Copy';
+        }
+        const info = await api('GET', `/api/marketplaces/${currentMp.slug}/publish-token`);
+        renderPublishTokens(info && info.tokens || []);
     }
 
     async function revokePublishToken(tokenId) {
@@ -790,6 +799,7 @@ curl -X POST ${window.location.origin}/api/marketplaces/${currentMp.slug}/upload
         try { await navigator.clipboard.writeText(val); }
         catch (e) { document.getElementById('publish-token-value').select(); document.execCommand('copy'); }
         document.getElementById('publish-token-copy-btn').textContent = 'Copied ✓';
+        setTimeout(() => { document.getElementById('publish-token-copy-btn').textContent = '📋 Copy'; }, 2000);
     }
 
     // TABS
