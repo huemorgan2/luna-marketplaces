@@ -344,26 +344,21 @@
                         </div>
                     </div>
                     <div class="card" id="publish-token-card" style="display:none; margin-top:1rem;">
-                        <h3 style="font-size:1rem; margin-bottom:0.25rem;">Publish Token</h3>
+                        <h3 style="font-size:1rem; margin-bottom:0.25rem;">Publish Tokens</h3>
                         <p style="font-size:0.8rem; color:var(--text-muted); margin-bottom:1rem;">
-                            A long-lived credential for publishing plugins to this marketplace from
-                            scripts and CI — use it as <code>LUNA_MP_TOKEN</code> or an
+                            Long-lived credentials for publishing plugins to this marketplace from
+                            scripts and CI — use one as <code>LUNA_MP_TOKEN</code> or an
                             <code>Authorization: Bearer</code> header. Scoped to this marketplace only.
+                            You can keep several active at once (e.g. one per machine or pipeline).
                         </p>
-                        <div id="publish-token-none" style="display:none;">
-                            <button class="btn btn-primary btn-sm" onclick="generatePublishToken()">Generate publish token</button>
-                        </div>
-                        <div id="publish-token-existing" style="display:none;">
-                            <div style="font-size:0.85rem; margin-bottom:0.75rem;">
-                                Active token <code id="publish-token-prefix" style="font-family:monospace;"></code>&hellip;
-                                <span id="publish-token-created" style="color:var(--text-muted);"></span>
-                            </div>
-                            <button class="btn btn-secondary btn-sm" onclick="generatePublishToken()">Regenerate</button>
-                            <button class="btn btn-secondary btn-sm" onclick="revokePublishToken()">Revoke</button>
+                        <div id="publish-token-list" style="margin-bottom:1rem;"></div>
+                        <div style="display:flex; gap:0.5rem;">
+                            <input class="input" id="publish-token-name" placeholder="Token name (e.g. CI deploy)" style="max-width:280px;">
+                            <button class="btn btn-primary btn-sm" onclick="generatePublishToken()">Generate token</button>
                         </div>
                         <div id="publish-token-reveal" style="display:none; margin-top:1rem;">
                             <div style="font-size:0.8rem; color:#e0a020; margin-bottom:0.5rem;">
-                                ⚠️ Shown once — copy and store it now. Regenerating invalidates the old token.
+                                ⚠️ Shown once — copy and store it now.
                             </div>
                             <div style="display:flex; gap:0.5rem;">
                                 <input class="input" id="publish-token-value" readonly style="font-family:monospace; font-size:0.8rem; flex:1;">
@@ -726,35 +721,49 @@
         else { const e = await res.json().catch(()=>({detail:'Upload failed'})); alert(e.detail || 'Upload failed'); }
     }
 
-    // PUBLISH TOKEN
+    // PUBLISH TOKENS
     async function loadPublishToken(canEdit) {
         const card = document.getElementById('publish-token-card');
         document.getElementById('publish-token-reveal').style.display = 'none';
         if (!canEdit) { card.style.display = 'none'; return; }
         card.style.display = 'block';
         const info = await api('GET', `/api/marketplaces/${currentMp.slug}/publish-token`);
-        renderPublishTokenInfo(info);
+        renderPublishTokens(info && info.tokens || []);
     }
 
-    function renderPublishTokenInfo(info) {
-        const has = info && info.exists;
-        document.getElementById('publish-token-none').style.display = has ? 'none' : 'block';
-        document.getElementById('publish-token-existing').style.display = has ? 'block' : 'none';
-        if (has) {
-            document.getElementById('publish-token-prefix').textContent = info.token_prefix || '';
-            document.getElementById('publish-token-created').textContent =
-                'created ' + fmtDate(info.created_at) +
-                (info.last_used_at ? ' · last used ' + fmtDate(info.last_used_at) : ' · never used');
+    function renderPublishTokens(tokens) {
+        const list = document.getElementById('publish-token-list');
+        if (!tokens.length) {
+            list.innerHTML = '<div style="font-size:0.85rem; color:var(--text-muted);">No active tokens.</div>';
+            return;
         }
+        list.innerHTML = tokens.map(t => `
+            <div style="display:flex; align-items:center; gap:0.75rem; padding:0.6rem 0; border-bottom:1px solid var(--border);">
+                <div style="flex:1; min-width:0;">
+                    <div style="font-size:0.85rem;">
+                        <strong>${esc(t.name) || 'Unnamed token'}</strong>
+                        <code style="font-family:monospace; margin-left:0.5rem; color:var(--text-muted);">${esc(t.token_prefix)}&hellip;</code>
+                    </div>
+                    <div style="font-size:0.75rem; color:var(--text-muted); margin-top:0.15rem;">
+                        created ${fmtDate(t.created_at)} · ${t.last_used_at ? 'last used ' + fmtDate(t.last_used_at) : 'never used'}
+                    </div>
+                </div>
+                <button class="btn btn-secondary btn-sm" onclick="revokePublishToken('${esc(t.id)}')">Revoke</button>
+            </div>`).join('');
     }
 
     async function generatePublishToken() {
+        const nameInput = document.getElementById('publish-token-name');
         const res = await fetch(`/api/marketplaces/${currentMp.slug}/publish-token`, {
-            method: 'POST', headers: {'Authorization': `Bearer ${token}`}
+            method: 'POST',
+            headers: {'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json'},
+            body: JSON.stringify({name: nameInput.value.trim()})
         });
         if (!res.ok) { const e = await res.json().catch(()=>({})); alert(e.detail || 'Failed to generate token'); return; }
         const data = await res.json();
-        renderPublishTokenInfo({exists: true, token_prefix: data.token_prefix, created_at: data.created_at});
+        nameInput.value = '';
+        const info = await api('GET', `/api/marketplaces/${currentMp.slug}/publish-token`);
+        renderPublishTokens(info && info.tokens || []);
         document.getElementById('publish-token-value').value = data.token;
         document.getElementById('publish-token-usage').textContent =
 `# publish_plugin.sh / CI
@@ -768,11 +777,12 @@ curl -X POST ${window.location.origin}/api/marketplaces/${currentMp.slug}/upload
         document.getElementById('publish-token-copy-btn').textContent = 'Copy';
     }
 
-    async function revokePublishToken() {
-        if (!confirm('Revoke the publish token for this marketplace? Scripts using it will stop working.')) return;
-        await api('DELETE', `/api/marketplaces/${currentMp.slug}/publish-token`);
+    async function revokePublishToken(tokenId) {
+        if (!confirm('Revoke this publish token? Scripts using it will stop working.')) return;
+        await api('DELETE', `/api/marketplaces/${currentMp.slug}/publish-token/${tokenId}`);
         document.getElementById('publish-token-reveal').style.display = 'none';
-        renderPublishTokenInfo({exists: false});
+        const info = await api('GET', `/api/marketplaces/${currentMp.slug}/publish-token`);
+        renderPublishTokens(info && info.tokens || []);
     }
 
     async function copyPublishToken() {

@@ -97,6 +97,7 @@ class PublishToken(Base):
     id = Column(String, primary_key=True, default=gen_uuid)
     user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
     marketplace_id = Column(String, ForeignKey("marketplaces.id"), nullable=False, index=True)
+    name = Column(String, nullable=False, default="")
     token_hash = Column(String, nullable=False, index=True)
     token_prefix = Column(String, nullable=False)
     created_at = Column(Integer, default=now_ts)

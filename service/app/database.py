@@ -37,6 +37,22 @@ engine = create_async_engine(DB_URL, **_engine_kwargs)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
+def _apply_column_additions(conn) -> None:
+    """Add columns introduced after a table first shipped (no Alembic here)."""
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(conn)
+    additions = [
+        ("publish_tokens", "name", "VARCHAR NOT NULL DEFAULT ''"),
+    ]
+    for table, column, ddl_type in additions:
+        if not inspector.has_table(table):
+            continue
+        existing = {c["name"] for c in inspector.get_columns(table)}
+        if column not in existing:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+
+
 async def init_db():
     if "sqlite" in DB_URL:
         Path(DB_URL.split("///")[1]).parent.mkdir(parents=True, exist_ok=True)
@@ -47,6 +63,7 @@ async def init_db():
         # creates missing tables, never alters existing ones).
         await run_migrations(conn)
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_apply_column_additions)
 
 
 async def get_db():

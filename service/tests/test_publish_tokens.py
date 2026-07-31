@@ -1,8 +1,9 @@
 """Publish tokens (plan 006): issue from the API, publish with them, scoping.
 
-Covers: create/get/regenerate/revoke lifecycle, uploading with a publish token,
-marketplace scoping (403 on the wrong marketplace), revoked token → 401, JWT
-sessions unaffected, and that a publish token cannot mint publish tokens.
+Covers: create/list/revoke lifecycle, multiple named tokens coexisting,
+uploading with a publish token, marketplace scoping (403 on the wrong
+marketplace), revoked token → 401, JWT sessions unaffected, and that a
+publish token cannot mint publish tokens.
 """
 
 from pathlib import Path
@@ -57,21 +58,28 @@ async def test_token_lifecycle_and_publish():
         await _ensure_marketplace(c, h, "pt-mp")
         await _ensure_marketplace(c, h, "pt-mp-other")
 
-        # No token yet
+        # No tokens yet
         info = (await c.get("/api/marketplaces/pt-mp/publish-token", headers=h)).json()
-        assert info["exists"] is False
+        assert info["tokens"] == []
 
-        # Create
-        created = (await c.post("/api/marketplaces/pt-mp/publish-token", headers=h)).json()
+        # Create a named token
+        created = (await c.post(
+            "/api/marketplaces/pt-mp/publish-token",
+            json={"name": "CI deploy"}, headers=h)).json()
         secret = created["token"]
         assert secret.startswith("lmp_")
         assert created["token_prefix"] == secret[:12]
+        assert created["name"] == "CI deploy"
+        assert created["created_at"] is not None
 
         # Metadata now exists, secret never echoed back
         info = (await c.get("/api/marketplaces/pt-mp/publish-token", headers=h)).json()
-        assert info["exists"] is True
-        assert info["token_prefix"] == secret[:12]
-        assert "token" not in info
+        assert len(info["tokens"]) == 1
+        item = info["tokens"][0]
+        assert item["name"] == "CI deploy"
+        assert item["token_prefix"] == secret[:12]
+        assert item["created_at"] == created["created_at"]
+        assert "token" not in item
 
         # Publish with the token instead of the JWT
         pt_h = {"Authorization": f"Bearer {secret}"}
@@ -97,51 +105,84 @@ async def test_token_lifecycle_and_publish():
 
         # last_used_at recorded
         info = (await c.get("/api/marketplaces/pt-mp/publish-token", headers=h)).json()
-        assert info["last_used_at"] is not None
+        assert info["tokens"][0]["last_used_at"] is not None
 
 
-async def test_regenerate_invalidates_old_token():
+async def test_multiple_tokens_coexist():
     async with _client() as c:
         h = await _login(c)
-        first = (await c.post("/api/marketplaces/pt-mp/publish-token", headers=h)).json()["token"]
-        second = (await c.post("/api/marketplaces/pt-mp/publish-token", headers=h)).json()["token"]
-        assert first != second
+        first = (await c.post(
+            "/api/marketplaces/pt-mp/publish-token",
+            json={"name": "laptop"}, headers=h)).json()
+        second = (await c.post(
+            "/api/marketplaces/pt-mp/publish-token",
+            json={"name": "build server"}, headers=h)).json()
+        assert first["token"] != second["token"]
 
+        # Both listed, each with its own name and created date
+        info = (await c.get("/api/marketplaces/pt-mp/publish-token", headers=h)).json()
+        names = {t["name"] for t in info["tokens"]}
+        assert {"laptop", "build server"} <= names
+        assert all(t["created_at"] is not None for t in info["tokens"])
+
+        # Both authenticate (409 = duplicate version ⇒ auth passed)
         zip_bytes = package_dir_to_zip(HW2)
-        old = await c.post(
-            "/api/marketplaces/pt-mp/upload",
-            files={"artifact": ("hw2.zip", zip_bytes, "application/zip")},
-            headers={"Authorization": f"Bearer {first}"},
-        )
-        assert old.status_code == 401
-
-        # New token authenticates (409 = duplicate version ⇒ auth passed)
-        new = await c.post(
-            "/api/marketplaces/pt-mp/upload",
-            files={"artifact": ("hw2.zip", zip_bytes, "application/zip")},
-            headers={"Authorization": f"Bearer {second}"},
-        )
-        assert new.status_code == 409
+        for tok in (first["token"], second["token"]):
+            r = await c.post(
+                "/api/marketplaces/pt-mp/upload",
+                files={"artifact": ("hw2.zip", zip_bytes, "application/zip")},
+                headers={"Authorization": f"Bearer {tok}"},
+            )
+            assert r.status_code in (200, 409), r.text
 
 
-async def test_revoke():
+async def test_create_without_name_defaults_empty():
     async with _client() as c:
         h = await _login(c)
-        secret = (await c.post("/api/marketplaces/pt-mp/publish-token", headers=h)).json()["token"]
+        created = (await c.post("/api/marketplaces/pt-mp/publish-token", headers=h)).json()
+        assert created["name"] == ""
+        assert created["token"].startswith("lmp_")
 
-        r = await c.delete("/api/marketplaces/pt-mp/publish-token", headers=h)
+
+async def test_revoke_single_token():
+    async with _client() as c:
+        h = await _login(c)
+        kept = (await c.post(
+            "/api/marketplaces/pt-mp/publish-token",
+            json={"name": "kept"}, headers=h)).json()
+        doomed = (await c.post(
+            "/api/marketplaces/pt-mp/publish-token",
+            json={"name": "doomed"}, headers=h)).json()
+
+        r = await c.delete(
+            f"/api/marketplaces/pt-mp/publish-token/{doomed['id']}", headers=h)
         assert r.json()["status"] == "revoked"
 
+        # Only the revoked token disappears from the list
         info = (await c.get("/api/marketplaces/pt-mp/publish-token", headers=h)).json()
-        assert info["exists"] is False
+        ids = {t["id"] for t in info["tokens"]}
+        assert kept["id"] in ids
+        assert doomed["id"] not in ids
 
+        # Revoked token → 401; the other still authenticates
         zip_bytes = package_dir_to_zip(HW2)
-        up = await c.post(
+        dead = await c.post(
             "/api/marketplaces/pt-mp/upload",
             files={"artifact": ("hw2.zip", zip_bytes, "application/zip")},
-            headers={"Authorization": f"Bearer {secret}"},
+            headers={"Authorization": f"Bearer {doomed['token']}"},
         )
-        assert up.status_code == 401
+        assert dead.status_code == 401
+        alive = await c.post(
+            "/api/marketplaces/pt-mp/upload",
+            files={"artifact": ("hw2.zip", zip_bytes, "application/zip")},
+            headers={"Authorization": f"Bearer {kept['token']}"},
+        )
+        assert alive.status_code in (200, 409)
+
+        # Revoking an already-revoked or unknown token id → 404
+        again = await c.delete(
+            f"/api/marketplaces/pt-mp/publish-token/{doomed['id']}", headers=h)
+        assert again.status_code == 404
 
 
 async def test_garbage_lmp_token_rejected():

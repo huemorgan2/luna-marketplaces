@@ -36,8 +36,10 @@ from ..models.schemas import (
     MyMarketplaceResponse,
     OrgCreate,
     OrgResponse,
+    PublishTokenCreate,
     PublishTokenCreated,
-    PublishTokenInfo,
+    PublishTokenItem,
+    PublishTokenList,
     TokenResponse,
     UserCreate,
     UserResponse,
@@ -418,88 +420,93 @@ async def _marketplace_for_token_management(
     return mp
 
 
-@router.get("/marketplaces/{mp_slug}/publish-token", response_model=PublishTokenInfo)
-async def get_publish_token_info(
+@router.get("/marketplaces/{mp_slug}/publish-token", response_model=PublishTokenList)
+async def list_publish_tokens(
     mp_slug: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     mp = await _marketplace_for_token_management(mp_slug, user, db)
     result = await db.execute(
-        select(PublishToken).where(
+        select(PublishToken)
+        .where(
             PublishToken.user_id == user.id,
             PublishToken.marketplace_id == mp.id,
             PublishToken.revoked == False,  # noqa: E712
         )
+        .order_by(PublishToken.created_at.desc())
     )
-    pt = result.scalars().first()
-    if not pt:
-        return PublishTokenInfo(exists=False)
-    return PublishTokenInfo(
-        exists=True,
-        token_prefix=pt.token_prefix,
-        created_at=pt.created_at,
-        last_used_at=pt.last_used_at,
+    return PublishTokenList(
+        tokens=[
+            PublishTokenItem(
+                id=pt.id,
+                name=pt.name or "",
+                token_prefix=pt.token_prefix,
+                created_at=pt.created_at,
+                last_used_at=pt.last_used_at,
+            )
+            for pt in result.scalars()
+        ]
     )
 
 
 @router.post("/marketplaces/{mp_slug}/publish-token", response_model=PublishTokenCreated)
 async def create_publish_token(
     mp_slug: str,
+    body: PublishTokenCreate | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create (or regenerate) the caller's publish token for this marketplace.
+    """Create a new publish token for this marketplace.
 
-    Any previous token for the same (user, marketplace) is revoked. The full
-    secret is returned only from this call.
+    Multiple tokens may be active at once. The full secret is returned only
+    from this call.
     """
     mp = await _marketplace_for_token_management(mp_slug, user, db)
-
-    existing = await db.execute(
-        select(PublishToken).where(
-            PublishToken.user_id == user.id,
-            PublishToken.marketplace_id == mp.id,
-            PublishToken.revoked == False,  # noqa: E712
-        )
-    )
-    for old in existing.scalars():
-        old.revoked = True
 
     secret = new_publish_token()
     pt = PublishToken(
         id=str(uuid.uuid4()),
         user_id=user.id,
         marketplace_id=mp.id,
+        name=(body.name.strip() if body else ""),
         token_hash=hash_publish_token(secret),
         token_prefix=secret[:12],
         created_at=now_ts(),
     )
     db.add(pt)
     await db.commit()
-    return PublishTokenCreated(token=secret, token_prefix=pt.token_prefix, created_at=pt.created_at)
+    return PublishTokenCreated(
+        id=pt.id,
+        name=pt.name,
+        token=secret,
+        token_prefix=pt.token_prefix,
+        created_at=pt.created_at,
+    )
 
 
-@router.delete("/marketplaces/{mp_slug}/publish-token")
+@router.delete("/marketplaces/{mp_slug}/publish-token/{token_id}")
 async def revoke_publish_token(
     mp_slug: str,
+    token_id: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     mp = await _marketplace_for_token_management(mp_slug, user, db)
     result = await db.execute(
         select(PublishToken).where(
+            PublishToken.id == token_id,
             PublishToken.user_id == user.id,
             PublishToken.marketplace_id == mp.id,
             PublishToken.revoked == False,  # noqa: E712
         )
     )
-    revoked = 0
-    for pt in result.scalars():
-        pt.revoked = True
-        revoked += 1
+    pt = result.scalar_one_or_none()
+    if not pt:
+        raise HTTPException(404, "Token not found")
+    pt.revoked = True
     await db.commit()
-    return {"status": "revoked", "count": revoked}
+    return {"status": "revoked"}
 
 
 async def _get_org_for_user(
