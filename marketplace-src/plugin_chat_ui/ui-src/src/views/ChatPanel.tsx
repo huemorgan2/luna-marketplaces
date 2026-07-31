@@ -13,6 +13,7 @@ import {
   type ModelChain, type CatalogEntry, type PlanTask, type PlanSnapshotTask,
 } from '@luna/lib/api'
 import { cachedGet, cachedSet } from '@luna/lib/cache'
+import { CHAT_BRIDGE_EVENT, type ChatBridgeMessage } from '@luna/lib/pluginBridge'
 import { inlineEmbedAssets, forceEagerEmbedImages } from '@luna/lib/embedAssets'
 import { reorderChainHead } from '@luna/lib/modelChain'
 import {
@@ -332,6 +333,26 @@ export function ChatPanel({
   }, [onConversationChange])
   const [messages, setMessages] = useState<UIMessage[]>([])
   const [input, setInput] = useState('')
+  // 065: chat bridge — the Composer parks a focus() thunk here, and the
+  // effect below routes shell-dispatched luna-chat actions into the composer.
+  const composerFocusRef = useRef<(() => void) | null>(null)
+  const sendRef = useRef<(t?: string) => Promise<void>>(async () => {})
+  useEffect(() => {
+    const onChat = (e: Event) => {
+      const d = (e as CustomEvent<ChatBridgeMessage>).detail
+      if (!d) return
+      if (d.action === 'prefill') {
+        setInput(d.text)
+        composerFocusRef.current?.()
+      } else if (d.action === 'focus') {
+        composerFocusRef.current?.()
+      } else if (d.action === 'send') {
+        void sendRef.current(d.text)
+      }
+    }
+    window.addEventListener(CHAT_BRIDGE_EVENT, onChat)
+    return () => window.removeEventListener(CHAT_BRIDGE_EVENT, onChat)
+  }, [])
   // 008.95: files staged in the composer (paste / drop / paperclip). Uploads
   // start immediately when a conversation exists; otherwise they run at send
   // time right after the conversation is created.
@@ -1335,9 +1356,14 @@ export function ChatPanel({
     setStaged([])
   }
 
-  async function send() {
-    const text = input.trim()
-    const stagedItems = stagedRef.current.filter((x) => x.status !== 'error')
+  sendRef.current = send
+
+  // 065: textOverride comes from the chat bridge ('send' action) — the text
+  // is not the composer draft, so the draft must survive untouched.
+  async function send(textOverride?: string) {
+    const fromBridge = typeof textOverride === 'string'
+    const text = (fromBridge ? textOverride : input).trim()
+    const stagedItems = fromBridge ? [] : stagedRef.current.filter((x) => x.status !== 'error')
     if (!text && !stagedItems.length) return
 
     // 031: while a turn is running, sending is WhatsApp-style — the message
@@ -1348,15 +1374,17 @@ export function ChatPanel({
       const convId = activeIdRef.current
       if (!convId) return
       if (text === '/stop' || text === '/stop!') {
-        setInput('')
+        if (!fromBridge) setInput('')
         const wantHard = text === '/stop!' || stopStage >= 1
         void stopTurn(convId, wantHard).catch(() => {})
         addSystemLine(wantHard ? 'Hard-stopping the agent.' : 'Stopping agent at the end of this step…')
         setStopStage(wantHard ? 2 : 1)
         return
       }
-      setInput('')
-      try { localStorage.removeItem(draftKey(activeIdRef.current)) } catch { /* ignore */ }
+      if (!fromBridge) {
+        setInput('')
+        try { localStorage.removeItem(draftKey(activeIdRef.current)) } catch { /* ignore */ }
+      }
       // 008.95: finish any staged uploads, then bind them to the queued message.
       let qAtts: AttachmentInfo[] = []
       let qDisplay: AttachmentInfo[] = []
@@ -1417,8 +1445,10 @@ export function ChatPanel({
       }
     }
 
-    setInput('')
-    try { localStorage.removeItem(draftKey(draftId)) } catch { /* ignore */ }
+    if (!fromBridge) {
+      setInput('')
+      try { localStorage.removeItem(draftKey(draftId)) } catch { /* ignore */ }
+    }
 
     // 008.95: finish staged uploads (starting them now if the conversation
     // was only just created) before opening the turn.
@@ -1828,6 +1858,7 @@ export function ChatPanel({
             value={input}
             onChange={setInput}
             onSubmit={send}
+            focusRef={composerFocusRef}
             streaming={streaming}
             stopStage={stopStage}
             onStop={handleStop}
@@ -2146,6 +2177,7 @@ function StagedChip({ item, onRemove }: { item: StagedAttachment; onRemove: () =
 function Composer({
   value, onChange, onSubmit, streaming, stopStage, onStop,
   toolNames, offline, contextStatus, staged, onAttach, onRemoveStaged,
+  focusRef,
 }: {
   value: string
   onChange: (v: string) => void
@@ -2159,6 +2191,8 @@ function Composer({
   staged: StagedAttachment[]
   onAttach: (files: File[]) => void
   onRemoveStaged: (id: string) => void
+  /** 065: chat bridge — receives a thunk that focuses the textarea. */
+  focusRef?: React.MutableRefObject<(() => void) | null>
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [dragOver, setDragOver] = useState(false)
@@ -2193,6 +2227,11 @@ function Composer({
   // default height (44px → 88px); only past that does an internal scrollbar
   // appear. Clearing the value (send) snaps it back to one line.
   const taRef = useRef<HTMLTextAreaElement | null>(null)
+  useEffect(() => {
+    if (!focusRef) return
+    focusRef.current = () => taRef.current?.focus()
+    return () => { focusRef.current = null }
+  }, [focusRef])
   useLayoutEffect(() => {
     const el = taRef.current
     if (!el) return
