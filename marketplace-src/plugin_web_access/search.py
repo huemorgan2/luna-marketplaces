@@ -201,8 +201,12 @@ async def run_search(
     n = _clamp(max_results, 1, 10, 5)
     provider = (os.environ.get("LUNA_WEB_SEARCH_PROVIDER") or "tavily").strip().lower()
 
-    owns_client = client is None
-    client = client or httpx.AsyncClient(timeout=DEFAULT_TIMEOUT)
+    # 068/phase002: default to the per-loop shared client (warm connections to
+    # Tavily/Google); an injected client (tests) is used as-is. Not closed here.
+    if client is None:
+        from .shared import shared_client
+
+        client = shared_client()
     try:
         if provider == "google":
             key = await resolve_credential("google_search_api_key", "LUNA_GOOGLE_SEARCH_API_KEY", vault)
@@ -234,9 +238,6 @@ async def run_search(
         return {"error": "search request failed", "detail": f"HTTP {exc.response.status_code}", "query": query, "provider": provider}
     except httpx.HTTPError as exc:
         return {"error": "search request failed", "detail": str(exc), "query": query, "provider": provider}
-    finally:
-        if owns_client:
-            await client.aclose()
 
     return {
         "query": query,

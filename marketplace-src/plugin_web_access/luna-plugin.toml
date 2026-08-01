@@ -1,6 +1,6 @@
 name = "plugin-web-access"
 shown_name = "Web Access"
-version = "0.2.4"
+version = "0.3.0"
 description = "Web search (Tavily/Google), page fetch, and HTTP client — live internet access."
 entry = "plugin_web_access"
 sdk_version = "0"

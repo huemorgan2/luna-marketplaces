@@ -83,12 +83,16 @@ async def run_fetch(url: str, *, client: httpx.AsyncClient | None = None) -> dic
     if blocked:
         return {"error": "blocked", "detail": blocked, "url": url}
 
-    owns = client is None
-    client = client or httpx.AsyncClient(
-        timeout=DEFAULT_TIMEOUT, follow_redirects=True, headers={"User-Agent": USER_AGENT}
-    )
+    # 068/phase002: default to the per-loop shared client (warm connections);
+    # an injected client (tests) is used as-is. Neither is closed here.
+    if client is None:
+        from .shared import shared_client
+
+        client = shared_client()
     try:
-        resp = await client.get(url)
+        resp = await client.get(
+            url, timeout=DEFAULT_TIMEOUT, headers={"User-Agent": USER_AGENT}
+        )
         resp.raise_for_status()
         ctype = resp.headers.get("content-type", "")
         if "html" in ctype or ctype == "":
@@ -108,6 +112,3 @@ async def run_fetch(url: str, *, client: httpx.AsyncClient | None = None) -> dic
         return {"error": "fetch failed", "detail": f"HTTP {exc.response.status_code}", "url": url}
     except httpx.HTTPError as exc:
         return {"error": "fetch failed", "detail": str(exc), "url": url}
-    finally:
-        if owns:
-            await client.aclose()

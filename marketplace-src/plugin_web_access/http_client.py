@@ -54,11 +54,16 @@ async def run_request(
     except (TypeError, ValueError):
         to = DEFAULT_TIMEOUT
 
-    owns = client is None
-    client = client or httpx.AsyncClient(timeout=to, follow_redirects=True, max_redirects=5)
+    # 068/phase002: default to the per-loop shared client; the caller's timeout
+    # travels per-request. An injected client (tests) is used as-is. Not closed.
+    if client is None:
+        from .shared import shared_client
+
+        client = shared_client()
     try:
         resp = await client.request(
-            method, url, headers=req_headers, content=content, json=json_body
+            method, url, headers=req_headers, content=content, json=json_body,
+            timeout=to,
         )
         text = resp.text
         parsed: Any = None
@@ -80,6 +85,3 @@ async def run_request(
         return out
     except httpx.HTTPError as exc:
         return {"error": "request failed", "detail": str(exc), "url": url, "method": method}
-    finally:
-        if owns:
-            await client.aclose()
