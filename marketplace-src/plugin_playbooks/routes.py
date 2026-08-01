@@ -30,6 +30,19 @@ router = APIRouter(
 )
 
 _session_factory: async_sessionmaker[AsyncSession] | None = None
+
+
+def _bust_sections() -> None:
+    """068/phase003: invalidate the cached playbooks prompt section after a
+    write. Best-effort — a miss just means one TTL-window of staleness."""
+    if _session_factory is None:
+        return
+    try:
+        from . import bust_sections_cache
+
+        bust_sections_cache(_session_factory)
+    except Exception:  # noqa: BLE001
+        pass
 _runner: Any = None
 _events: Any = None
 _sync_bindings: Any = None
@@ -250,6 +263,7 @@ async def create_playbook(body: PlaybookCreate):
         )
         session.add(p)
         await session.commit()
+        _bust_sections()
         await session.refresh(p)
     await _notify_changed(body.name)
     return {"id": str(p.id), "name": p.name, "status": "created"}
@@ -283,6 +297,7 @@ async def update_playbook(name: str, body: PlaybookUpdate):
         p.display_name = pb_def.display_name or p.display_name
         p.inputs_schema = pb_def.inputs
         await session.commit()
+        _bust_sections()
         version = p.version
     await _notify_changed(name)
     return {"name": name, "version": version, "status": "updated"}
@@ -298,6 +313,7 @@ async def enable_playbook(name: str):
             raise HTTPException(404)
         p.status = "enabled"
         await session.commit()
+        _bust_sections()
     await _notify_changed(name)
     return {"name": name, "status": "enabled"}
 
@@ -312,6 +328,7 @@ async def disable_playbook(name: str):
             raise HTTPException(404)
         p.status = "disabled"
         await session.commit()
+        _bust_sections()
     await _notify_changed(name)
     return {"name": name, "status": "disabled"}
 
@@ -337,6 +354,7 @@ async def patch_playbook(name: str, body: PlaybookPatch):
         if body.description is not None:
             p.description = body.description
         await session.commit()
+        _bust_sections()
         status_out = p.status
     await _notify_changed(name)
     return {"name": name, "status": status_out}
@@ -356,6 +374,7 @@ async def patch_autonomy(name: str, body: AutonomyPatch):
             raise HTTPException(404)
         p.agent_autonomy = body.agent_autonomy
         await session.commit()
+        _bust_sections()
         return {"name": name, "agent_autonomy": body.agent_autonomy}
 
 
@@ -369,6 +388,7 @@ async def archive_playbook(name: str):
             raise HTTPException(404)
         p.status = "archived"
         await session.commit()
+        _bust_sections()
     await _notify_changed(name)
     return {"name": name, "status": "archived"}
 
@@ -551,6 +571,7 @@ async def promote_version(name: str, body: PromoteBody):
         p.inputs_schema = pb_def.inputs
 
         await session.commit()
+        _bust_sections()
         return {
             "name": name,
             "version": p.version,
@@ -602,6 +623,7 @@ async def create_draft(body: DraftCreate | None = None):
         )
         session.add(draft)
         await session.commit()
+        _bust_sections()
         await session.refresh(draft)
         return {
             "id": str(draft.id),
@@ -635,6 +657,7 @@ async def update_draft(draft_id: str, body: dict):
         if "name" in body:
             d.name = body["name"]
         await session.commit()
+        _bust_sections()
         return {"id": str(d.id), "name": d.name}
 
 
@@ -667,6 +690,7 @@ async def promote_draft(draft_id: str):
         session.add(p)
         await session.delete(d)
         await session.commit()
+        _bust_sections()
         await session.refresh(p)
         return {"id": str(p.id), "name": p.name, "status": "created"}
 
@@ -679,4 +703,5 @@ async def delete_draft(draft_id: str):
             raise HTTPException(404)
         await session.delete(d)
         await session.commit()
+        _bust_sections()
         return {"id": draft_id, "status": "deleted"}

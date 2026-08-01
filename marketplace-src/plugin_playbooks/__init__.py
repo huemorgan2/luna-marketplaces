@@ -7,6 +7,41 @@ on triggers or on demand.
 
 from luna_sdk import LunaPlugin, PluginContext, PluginManifest, SidebarSection, SkillDef
 
+# 068/phase003: prompt_sections runs every turn but playbooks change only via
+# the authoring routes/tools. Factory-scoped TTL cache + explicit busts from
+# every status write (routes.py / agent_tools.py call bust_sections_cache).
+_SECTIONS_CACHE_ATTR = "_luna_playbooks_sections_cache"
+_SECTIONS_TTL_S = 30.0
+
+
+def _sections_cache_get(sf) -> list[str] | None:
+    import time
+
+    cached = getattr(sf, _SECTIONS_CACHE_ATTR, None)
+    if cached is None:
+        return None
+    ts, sections = cached
+    if (time.monotonic() - ts) >= _SECTIONS_TTL_S:
+        return None
+    return list(sections)
+
+
+def _sections_cache_put(sf, sections: list[str]) -> None:
+    import time
+
+    try:
+        setattr(sf, _SECTIONS_CACHE_ATTR, (time.monotonic(), list(sections)))
+    except Exception:  # noqa: BLE001 — cache is best-effort
+        pass
+
+
+def bust_sections_cache(sf) -> None:
+    """Invalidate the cached prompt section (call after any playbook write)."""
+    try:
+        delattr(sf, _SECTIONS_CACHE_ATTR)
+    except Exception:  # noqa: BLE001
+        pass
+
 
 class PlaybooksPlugin(LunaPlugin):
     manifest = PluginManifest(
@@ -494,6 +529,12 @@ class PlaybooksPlugin(LunaPlugin):
         if not self._session_factory:
             return []
 
+        # 068/phase003: per-turn read, write-rarely data — factory-scoped TTL
+        # cache; every playbook status write busts it (bust_sections_cache).
+        cached = _sections_cache_get(self._session_factory)
+        if cached is not None:
+            return cached
+
         from sqlalchemy import select
         from .models import Playbook
 
@@ -508,6 +549,7 @@ class PlaybooksPlugin(LunaPlugin):
             )).all()
 
         if not rows:
+            _sections_cache_put(self._session_factory, [])
             return []
 
         lines = [
@@ -535,7 +577,9 @@ class PlaybooksPlugin(LunaPlugin):
             "run was started from, live.",
         ]
 
-        return ["\n".join(lines)]
+        sections = ["\n".join(lines)]
+        _sections_cache_put(self._session_factory, sections)
+        return sections
 
     async def on_unload(self) -> None:
         if self._trigger_service:

@@ -44,6 +44,17 @@ async def _load_all_playbook_steps(
     return out
 
 
+def _make_bust(session_factory):
+    def _bust() -> None:
+        try:
+            from . import bust_sections_cache
+
+            bust_sections_cache(session_factory)
+        except Exception:  # noqa: BLE001
+            pass
+    return _bust
+
+
 def build_tools(
     session_factory: async_sessionmaker[AsyncSession],
     events: EventBus,
@@ -103,6 +114,7 @@ def build_tools(
             )
             session.add(playbook)
             await session.commit()
+            _make_bust(session_factory)()
             await session.refresh(playbook)
 
         await events.emit("playbook.created", {
@@ -354,6 +366,7 @@ def build_tools(
             old = playbook.agent_autonomy
             playbook.agent_autonomy = agent_autonomy
             await session.commit()
+            _make_bust(session_factory)()
         return json.dumps({
             "playbook": name,
             "old_autonomy": old,
@@ -589,6 +602,7 @@ def build_tools(
             playbook.display_name = pb_def.display_name or playbook.display_name
             playbook.inputs_schema = pb_def.inputs
             await session.commit()
+            _make_bust(session_factory)()
             new_version = playbook.version
 
         # resync triggers/bindings + refresh the open canvas.

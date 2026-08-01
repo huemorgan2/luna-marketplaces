@@ -144,12 +144,16 @@ class MCPClient:
             out: list[dict[str, Any]] = []
             for t in resp.tools:
                 destructive = bool(
-                    getattr(t.annotations, "destructiveHint", False)
+                    (getattr(t.annotations, "destructiveHint", None)
+                     if hasattr(t.annotations, "destructiveHint")
+                     else getattr(t.annotations, "destructive_hint", False))
                     if t.annotations
                     else False
                 )
                 read_only = bool(
-                    getattr(t.annotations, "readOnlyHint", False)
+                    (getattr(t.annotations, "readOnlyHint", None)
+                     if hasattr(t.annotations, "readOnlyHint")
+                     else getattr(t.annotations, "read_only_hint", False))
                     if t.annotations
                     else False
                 )
@@ -157,7 +161,12 @@ class MCPClient:
                     {
                         "name": t.name,
                         "description": t.description or "",
-                        "input_schema": t.inputSchema or {"type": "object", "properties": {}},
+                        # mcp<2 exposes camelCase `inputSchema`; mcp>=2.0 renamed
+                        # it to `input_schema` (068/phase003 — pydantic raises
+                        # AttributeError on the old name, killing list_tools).
+                        "input_schema": getattr(t, "inputSchema", None)
+                        or getattr(t, "input_schema", None)
+                        or {"type": "object", "properties": {}},
                         "destructive": destructive,
                         "read_only": read_only,
                     }
@@ -181,7 +190,11 @@ class MCPClient:
                 if text:
                     text_parts.append(text)
             joined = "\n".join(text_parts).strip()
-            if result.isError:
+            # mcp<2: `isError`; mcp>=2.0: `is_error` (068/phase003).
+            is_error = getattr(result, "isError", None)
+            if is_error is None:
+                is_error = getattr(result, "is_error", False)
+            if is_error:
                 raise MCPClientError(joined or f"tool '{name}' returned isError without content")
             return joined
 

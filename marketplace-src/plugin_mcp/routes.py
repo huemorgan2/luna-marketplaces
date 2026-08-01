@@ -31,6 +31,43 @@ def register_routes(app, ctx):
     def _mgr():
         return get_manager()
 
+    # 068/phase003: re-boot MCP servers once the REAL event loop is running.
+    # Plugin on_load runs on a throwaway bootstrap loop (luna_serve's
+    # asyncio.run); clients connected there are zombies — every call returns
+    # server_offline. Mirrors plugin_connectors' startup restore. boot() is
+    # loop-aware, so on the `luna serve` CLI path (which already re-boots via
+    # cli.py) this is a no-op instead of a double boot.
+    async def _reboot_on_startup() -> None:
+        import asyncio
+        import logging
+
+        log = logging.getLogger("plugin-mcp.routes")
+
+        async def _go() -> None:
+            mgr = get_manager()
+            if mgr is None:
+                return
+            if getattr(mgr, "_boot_loop_id", None) == id(asyncio.get_running_loop()):
+                return  # already booted on this loop
+            # Zombie clients exist only on the ASGI path (on_load's bootstrap
+            # loop died with them). The CLI path shuts down in its bootstrap
+            # loop, so the dict is empty there and we skip straight to boot —
+            # never racing cli.py's own startup reboot with a shutdown.
+            if mgr._clients:
+                try:
+                    await mgr.shutdown()  # best-effort: reap bootstrap-loop zombies
+                except Exception as e:  # noqa: BLE001
+                    log.warning("mcp startup pre-shutdown failed: %s", e)
+            try:
+                await mgr.boot()
+            except Exception as e:  # noqa: BLE001
+                log.warning("mcp startup boot failed: %s", e)
+
+        asyncio.create_task(_go())
+
+    # FastAPI ≥0.136 dropped add_event_handler; the Starlette router list remains.
+    app.router.on_startup.append(_reboot_on_startup)
+
     @router.get("/servers", response_model=list[MCPServerInfo])
     async def list_servers(user=Depends(get_current_user)):
         mgr = _mgr()
