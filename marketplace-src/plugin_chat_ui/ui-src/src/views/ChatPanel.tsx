@@ -2371,7 +2371,10 @@ function ComposerModelSelect() {
   const [catalog, setCatalog] = useState<CatalogEntry[] | null>(null)
   const [configured, setConfigured] = useState<string[]>([])
   // 064: per-model context-window caps ("provider:model" → tokens).
-  const [windowCaps, setWindowCaps] = useState<Record<string, number>>({})
+  // 067: undefined = the core didn't advertise caps support (no `window_caps`
+  // in its catalog response) — the picker then hides the window pulldown
+  // entirely instead of rendering a control that can't read or persist.
+  const [windowCaps, setWindowCaps] = useState<Record<string, number> | undefined>(undefined)
   const [saving, setSaving] = useState(false)
 
   const load = useCallback(() => {
@@ -2381,7 +2384,7 @@ function ComposerModelSelect() {
       .then((c) => {
         setCatalog(c.catalog.reasoning)
         setConfigured(c.configured_providers)
-        setWindowCaps(c.window_caps ?? {})
+        setWindowCaps(c.window_caps)
       })
       .catch(() => setCatalog([]))
   }, [])
@@ -2450,6 +2453,7 @@ function ComposerModelSelect() {
   // 064: persist a per-model window cap (null clears back to Max). Optimistic;
   // caps-only write (empty chain) leaves the chain untouched.
   async function onWindowCapChange(fqn: string, cap: number | null) {
+    if (windowCaps == null) return // core without caps support — pulldown hidden anyway
     const prev = windowCaps
     setWindowCaps((cs) => {
       const next = { ...cs }
