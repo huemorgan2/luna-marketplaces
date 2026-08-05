@@ -2003,10 +2003,11 @@ function MessageAttachments({ attachments }: { attachments: AttachmentInfo[] }) 
   )
 }
 
-// 071: the agent's reasoning trace. While `live` (the answer hasn't started) it
-// renders expanded and auto-scrolls as thinking streams in; otherwise it folds
-// into a clickable "Thought Ns" pill (N = wall-seconds spent reasoning) that
-// toggles the full trace back open for reading.
+// 071/072: the agent's reasoning trace. While `live` (the answer hasn't started)
+// the trace is the bubble's primary content — it streams into the chat in full
+// answer-body typography with no inner scroll clamp, so the timeline's own
+// auto-scroll follows it as it grows. Once done it folds into a compact
+// clickable "Thought Ns" pill (N = wall-seconds) that toggles the trace open.
 export const ReasoningBlock = memo(function ReasoningBlock({
   text,
   ms,
@@ -2018,42 +2019,47 @@ export const ReasoningBlock = memo(function ReasoningBlock({
 }) {
   const [open, setOpen] = useState(false)
   const seconds = Math.max(1, Math.round((ms ?? 0) / 1000))
-  const bodyRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (live && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
-  }, [text, live])
-  const showText = live || open
+
+  // 072: live — stream the reasoning prominently in-flow (replaces the old
+  // muted, height-clamped scrollbox and the "thinking" dots). The messages
+  // effect scrolls the timeline to follow, so no inner scroll is needed.
+  if (live) {
+    return (
+      <div className="mb-1" data-testid="reasoning-live">
+        <div
+          className="flex items-center gap-1.5 text-[12px] text-luna-300 mb-1.5"
+          data-testid="reasoning-pill"
+        >
+          <span aria-hidden>💭</span>
+          <span className="dots">Reasoning {seconds}s</span>
+        </div>
+        <div
+          data-testid="reasoning-text"
+          className="text-[15px] leading-relaxed text-ink-200/90 whitespace-pre-wrap"
+        >
+          {text}
+        </div>
+      </div>
+    )
+  }
+
+  // Folded — compact clickable pill; the trace stays collapsed until clicked.
   return (
     <div className="mb-2">
       <button
         type="button"
-        onClick={() => { if (!live) setOpen((v) => !v) }}
-        className={cn(
-          'inline-flex items-center gap-1.5 text-[12px] rounded-full px-2.5 py-1 border transition',
-          live
-            ? 'text-luna-300 border-luna-500/30 bg-luna-600/10 cursor-default'
-            : 'text-ink-400 border-white/10 bg-ink-800/60 hover:text-ink-200 hover:border-white/20',
-        )}
+        onClick={() => setOpen((v) => !v)}
+        className="inline-flex items-center gap-1.5 text-[12px] rounded-full px-2.5 py-1 border transition text-ink-400 border-white/10 bg-ink-800/60 hover:text-ink-200 hover:border-white/20"
         data-testid="reasoning-pill"
       >
         <span aria-hidden>💭</span>
-        {live ? (
-          <span className="dots">Reasoning {seconds}s</span>
-        ) : (
-          <>
-            <span>Thought {seconds}s</span>
-            <ChevronDown className={cn('w-3 h-3 transition-transform', open && 'rotate-180')} />
-          </>
-        )}
+        <span>Thought {seconds}s</span>
+        <ChevronDown className={cn('w-3 h-3 transition-transform', open && 'rotate-180')} />
       </button>
-      {showText && (
+      {open && (
         <div
-          ref={bodyRef}
           data-testid="reasoning-text"
-          className={cn(
-            'mt-1.5 text-[13px] leading-relaxed text-ink-400 whitespace-pre-wrap border-l-2 border-luna-500/30 pl-3',
-            live && 'max-h-44 overflow-y-auto',
-          )}
+          className="mt-1.5 text-[13px] leading-relaxed text-ink-400 whitespace-pre-wrap border-l-2 border-luna-500/30 pl-3"
         >
           {text}
         </div>
