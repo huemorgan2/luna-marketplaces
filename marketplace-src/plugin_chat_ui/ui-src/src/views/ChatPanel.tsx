@@ -282,6 +282,12 @@ interface UIMessage {
   tasks?: PlanSnapshotTask[] | null
   // 008.95: user-message attachments (image thumbnails / file chips).
   attachments?: AttachmentInfo[] | null
+  // 071: the agent's live reasoning trace. While the bubble is pending with no
+  // answer text yet it renders expanded and ticking; once the answer starts (or
+  // on reload) it folds into a clickable "Thought Ns" pill. reasoning_ms is
+  // wall-ms spent thinking (÷1000 = the pill's N).
+  reasoning?: string
+  reasoning_ms?: number
 }
 
 // 008.95: a file staged in the composer, uploading (or awaiting a
@@ -615,6 +621,43 @@ export function ChatPanel({
     }
   }, [flushDeltasNow])
 
+  // 071: same per-frame batching for the reasoning trace. Buffer per message id
+  // carries accumulated text + the latest wall-ms so the folded pill can label
+  // "Thought Ns". A reasoning delta can arrive before the first answer token, so
+  // the buffer key is the pending assistant bubble's id (set by onNewMessage).
+  const reasoningBufRef = useRef<Map<string, { text: string; ms: number }>>(new Map())
+  const reasoningRafRef = useRef<number | null>(null)
+  const flushReasoningNow = useCallback(() => {
+    if (reasoningRafRef.current !== null) {
+      cancelAnimationFrame(reasoningRafRef.current)
+      reasoningRafRef.current = null
+    }
+    const buf = reasoningBufRef.current
+    if (buf.size === 0) return
+    reasoningBufRef.current = new Map()
+    setMessages((m) =>
+      m.map((msg) => {
+        const add = buf.get(msg.id)
+        return add
+          ? { ...msg, reasoning: (msg.reasoning ?? '') + add.text, reasoning_ms: add.ms }
+          : msg
+      }),
+    )
+  }, [])
+  const queueReasoning = useCallback((id: string, text: string, ms?: number) => {
+    const prev = reasoningBufRef.current.get(id)
+    reasoningBufRef.current.set(id, {
+      text: (prev?.text ?? '') + text,
+      ms: ms ?? prev?.ms ?? 0,
+    })
+    if (reasoningRafRef.current === null) {
+      reasoningRafRef.current = requestAnimationFrame(() => {
+        reasoningRafRef.current = null
+        flushReasoningNow()
+      })
+    }
+  }, [flushReasoningNow])
+
   // 006.7: trigger a headless agent turn so the model can respond to a
   // rejection that landed after the original SSE stream closed.
   function triggerContinuation(convId: string) {
@@ -634,6 +677,7 @@ export function ChatPanel({
     let needsChain = false
     continueConversation(convId, {
       onDelta: (delta) => queueDelta(currentMsgId, delta),
+      onReasoning: (r) => queueReasoning(currentMsgId, r.text, r.ms),
       onNewMessage: (id) => {
         currentMsgId = id
         setMessages((m) => [
@@ -670,6 +714,7 @@ export function ChatPanel({
       },
       onDone: (_text, meta) => {
         flushDeltasNow()
+        flushReasoningNow()
         // 036/phase02: a superseded draft is persisted server-side as
         // superseded_partial — keep it (dimmed/collapsed), never a silent void.
         setMessages((m) =>
@@ -693,6 +738,7 @@ export function ChatPanel({
       .catch(() => {})
       .finally(() => {
         flushDeltasNow()
+        flushReasoningNow()
         setStreaming(false)
         streamingRef.current = false
         if (needsChain && activeIdRef.current === convId) {
@@ -734,6 +780,7 @@ export function ChatPanel({
     try {
       await attachTurnStream(convId, {
         onDelta: (delta) => queueDelta(currentMsgId, delta),
+        onReasoning: (r) => queueReasoning(currentMsgId, r.text, r.ms),
         onToolCall: (names) => setToolNames((n) => [...n, ...names]),
         onNewMessage: (id) => {
           currentMsgId = id
@@ -745,6 +792,7 @@ export function ChatPanel({
         onUiEvent: handleUiEvent,
         onDone: (_text, meta) => {
           flushDeltasNow()
+          flushReasoningNow()
           // 036/phase02: the superseded draft IS in the DB (superseded_partial)
           // — drop only the local pending bubble; resync renders the truth,
           // including the ⏹ turn_stopped marker row.
@@ -761,6 +809,7 @@ export function ChatPanel({
         },
         onClosed: () => {
           flushDeltasNow()
+          flushReasoningNow()
           setMessages((m) => m.map((msg) => (msg.pending ? { ...msg, pending: false } : msg)))
           resync()
         },
@@ -772,6 +821,7 @@ export function ChatPanel({
       resync()
     } finally {
       flushDeltasNow()
+      flushReasoningNow()
       if (attachCtrlRef.current === ctrl) {
         attachCtrlRef.current = null
         setStreaming(false)
@@ -1497,6 +1547,7 @@ export function ChatPanel({
       let currentMsgId = assistantMsg.id
       await sendMessageStream(convId, text, {
         onDelta: (delta) => queueDelta(currentMsgId, delta),
+        onReasoning: (r) => queueReasoning(currentMsgId, r.text, r.ms),
         onToolCall: (names) => setToolNames((n) => [...n, ...names]),
         onToolResult: (_name, _result, embed) => {
           if (embed?.embed_iframe || embed?.embed_html) {
@@ -1554,6 +1605,7 @@ export function ChatPanel({
         },
         onDone: (_text, meta) => {
           flushDeltasNow()
+          flushReasoningNow()
           // 036/phase02: a superseded draft stays visible as a dimmed,
           // collapsed "interrupted" bubble (persisted server-side as
           // superseded_partial); the follow-up turn still owns THE reply.
@@ -1585,6 +1637,7 @@ export function ChatPanel({
         },
         onError: (err) => {
           flushDeltasNow()
+          flushReasoningNow()
           setMessages((m) =>
             m.map((msg) =>
               msg.id === currentMsgId
@@ -1611,6 +1664,7 @@ export function ChatPanel({
         // persisted, instead of a bubble that spins forever.
         onClosed: () => {
           flushDeltasNow()
+          flushReasoningNow()
           const convId = activeIdRef.current
           setMessages((m) => m.map((msg) => (msg.pending ? { ...msg, pending: false } : msg)))
           if (convId) {
@@ -1624,6 +1678,7 @@ export function ChatPanel({
       }, undefined, sendAtts.length ? sendAtts : undefined)
     } finally {
       flushDeltasNow()
+      flushReasoningNow()
       sendBusyRef.current = false
       setStreaming(false)
       streamingRef.current = false
@@ -1948,6 +2003,65 @@ function MessageAttachments({ attachments }: { attachments: AttachmentInfo[] }) 
   )
 }
 
+// 071: the agent's reasoning trace. While `live` (the answer hasn't started) it
+// renders expanded and auto-scrolls as thinking streams in; otherwise it folds
+// into a clickable "Thought Ns" pill (N = wall-seconds spent reasoning) that
+// toggles the full trace back open for reading.
+export const ReasoningBlock = memo(function ReasoningBlock({
+  text,
+  ms,
+  live,
+}: {
+  text: string
+  ms?: number
+  live: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  const seconds = Math.max(1, Math.round((ms ?? 0) / 1000))
+  const bodyRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (live && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
+  }, [text, live])
+  const showText = live || open
+  return (
+    <div className="mb-2">
+      <button
+        type="button"
+        onClick={() => { if (!live) setOpen((v) => !v) }}
+        className={cn(
+          'inline-flex items-center gap-1.5 text-[12px] rounded-full px-2.5 py-1 border transition',
+          live
+            ? 'text-luna-300 border-luna-500/30 bg-luna-600/10 cursor-default'
+            : 'text-ink-400 border-white/10 bg-ink-800/60 hover:text-ink-200 hover:border-white/20',
+        )}
+        data-testid="reasoning-pill"
+      >
+        <span aria-hidden>💭</span>
+        {live ? (
+          <span className="dots">Reasoning {seconds}s</span>
+        ) : (
+          <>
+            <span>Thought {seconds}s</span>
+            <ChevronDown className={cn('w-3 h-3 transition-transform', open && 'rotate-180')} />
+          </>
+        )}
+      </button>
+      {showText && (
+        <div
+          ref={bodyRef}
+          data-testid="reasoning-text"
+          className={cn(
+            'mt-1.5 text-[13px] leading-relaxed text-ink-400 whitespace-pre-wrap border-l-2 border-luna-500/30 pl-3',
+            live && 'max-h-44 overflow-y-auto',
+          )}
+        >
+          {text}
+        </div>
+      )}
+    </div>
+  )
+})
+
 function Bubble({ message, emoji, avatarUrl }: { message: UIMessage; emoji: string; avatarUrl?: string | null }) {
   const isUser = message.role === 'user'
   // 009.001/phase02 (E12): any non-null source is an automation origin —
@@ -2006,17 +2120,26 @@ function Bubble({ message, emoji, avatarUrl }: { message: UIMessage; emoji: stri
             )}
           </>
         ) : (
-          <div className="prose-luna">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              urlTransform={chatUrlTransform}
-              components={chatMarkdownComponents}
-            >
-              {message.content || (message.pending ? '...' : '')}
-            </ReactMarkdown>
-          </div>
+          <>
+            {message.reasoning && (
+              <ReasoningBlock
+                text={message.reasoning}
+                ms={message.reasoning_ms}
+                live={!!message.pending && !message.content}
+              />
+            )}
+            <div className="prose-luna">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                urlTransform={chatUrlTransform}
+                components={chatMarkdownComponents}
+              >
+                {message.content || (message.pending && !message.reasoning ? '...' : '')}
+              </ReactMarkdown>
+            </div>
+          </>
         )}
-        {message.pending && !message.content && (
+        {message.pending && !message.content && !message.reasoning && (
           <span className="text-ink-500 text-sm dots">thinking</span>
         )}
         {message.embed_iframe && (
@@ -3264,6 +3387,8 @@ function apiToUI(m: ApiMessage): UIMessage {
     plan_status: m.plan_status ?? undefined,
     tasks: m.tasks ?? undefined,
     attachments: m.attachments ?? undefined,
+    reasoning: m.reasoning ?? undefined,
+    reasoning_ms: m.reasoning_ms ?? undefined,
   }
 }
 
