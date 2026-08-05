@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Plus, Send, Trash2, Loader2, MoreHorizontal, Pencil, Check, X, Copy, ChevronDown, ChevronLeft, Info, Square, Clock, Wrench, Paperclip, FileText } from 'lucide-react'
+import { Plus, Send, Trash2, Loader2, MoreHorizontal, Pencil, Check, X, Copy, ChevronDown, ChevronLeft, Info, Square, Clock, Wrench, Paperclip, FileText, Brain, Zap, Hand } from 'lucide-react'
 import { cn } from '@luna/lib/cn'
 import { agentName, useIdentity } from '@luna/lib/identityStore'
 import {
@@ -2030,7 +2030,7 @@ export const ReasoningBlock = memo(function ReasoningBlock({
           className="flex items-center gap-1.5 text-[12px] text-luna-300 mb-1.5"
           data-testid="reasoning-pill"
         >
-          <span aria-hidden>💭</span>
+          <Brain className="w-3.5 h-3.5" aria-hidden />
           <span className="dots">Reasoning {seconds}s</span>
         </div>
         <div
@@ -2052,7 +2052,7 @@ export const ReasoningBlock = memo(function ReasoningBlock({
         className="inline-flex items-center gap-1.5 text-[12px] rounded-full px-2.5 py-1 border transition text-ink-400 border-white/10 bg-ink-800/60 hover:text-ink-200 hover:border-white/20"
         data-testid="reasoning-pill"
       >
-        <span aria-hidden>💭</span>
+        <Brain className="w-3 h-3" aria-hidden />
         <span>Thought {seconds}s</span>
         <ChevronDown className={cn('w-3 h-3 transition-transform', open && 'rotate-180')} />
       </button>
@@ -2089,9 +2089,9 @@ function Bubble({ message, emoji, avatarUrl }: { message: UIMessage; emoji: stri
               : 'bg-luna-600/20 border-luna-500/30',
         )}>
           {isReflection
-            ? '💭'
+            ? <Brain className="w-4 h-4 text-sky-400" aria-hidden />
             : isAuto
-              ? '⚡'
+              ? <Zap className="w-4 h-4 text-violet-400" aria-hidden />
               : <AgentAvatar avatarUrl={avatarUrl} emoji={emoji} displaySize={32} imgClassName="w-full h-full object-cover" />}
         </div>
       )}
@@ -2159,12 +2159,12 @@ function Bubble({ message, emoji, avatarUrl }: { message: UIMessage; emoji: stri
             data-testid="reflection-badge"
             className="mt-1.5 pt-1.5 border-t border-sky-500/20 text-[11px] text-sky-400 flex items-center gap-1"
           >
-            <span>💭</span> Reflection
+            <Brain className="w-3 h-3" aria-hidden /> Reflection
           </div>
         )}
         {isAuto && (
           <div className="mt-1.5 pt-1.5 border-t border-violet-500/20 text-[11px] text-violet-400 flex items-center gap-1">
-            <span>⚡</span> Auto sent from {autoSource} run
+            <Zap className="w-3 h-3" aria-hidden /> Auto sent from {autoSource} run
           </div>
         )}
       </div>
@@ -2227,7 +2227,8 @@ function InterruptedDraft({ content }: { content: string }) {
           className="flex items-center gap-1.5 text-[12px] text-ink-500 hover:text-ink-300 transition-colors px-2 py-1 rounded-md hover:bg-white/[0.03] text-left"
         >
           <span className={cn('transition-transform text-[10px]', open && 'rotate-90')}>▸</span>
-          <span className="uppercase tracking-wide text-[11px]">✋ interrupted — draft not delivered</span>
+          <Hand className="w-3 h-3" aria-hidden />
+          <span className="uppercase tracking-wide text-[11px]">interrupted — draft not delivered</span>
         </button>
         {open && (
           <div className="ml-5 mt-1 pl-3 border-l border-white/10 text-[13px] text-ink-400 opacity-70 prose-luna">
