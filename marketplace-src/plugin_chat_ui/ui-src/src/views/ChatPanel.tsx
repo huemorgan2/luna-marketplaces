@@ -2102,7 +2102,7 @@ export const ReasoningBlock = memo(function ReasoningBlock({
         <div
           ref={bodyRef}
           data-testid="reasoning-text"
-          className="text-[12px] leading-relaxed text-ink-600 whitespace-pre-wrap max-h-[7rem] overflow-y-auto rounded-lg bg-black/30 border border-white/5 px-3 py-2"
+          className="text-[13px] leading-relaxed text-ink-500 whitespace-pre-wrap max-h-[7.5rem] overflow-y-auto rounded-lg bg-black/30 border border-white/5 px-3 py-2"
         >
           {segsRef.current.map((seg, i) => (
             <span key={i} className="reasoning-seg">{seg}</span>
@@ -2130,7 +2130,7 @@ export const ReasoningBlock = memo(function ReasoningBlock({
       {open && (
         <div
           data-testid="reasoning-text"
-          className="mt-1 text-[12px] leading-relaxed text-ink-500 whitespace-pre-wrap max-h-[10rem] overflow-y-auto rounded-lg bg-black/30 border border-white/5 px-3 py-2"
+          className="mt-1 text-[13px] leading-relaxed text-ink-400 whitespace-pre-wrap max-h-[10rem] overflow-y-auto rounded-lg bg-black/30 border border-white/5 px-3 py-2"
         >
           {text}
         </div>

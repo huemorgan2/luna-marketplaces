@@ -60,7 +60,7 @@
 }
 @keyframes reasoningSegFade {
   from { color: #fafafa; }
-  to { color: #52525b; }
+  to { color: #71717a; }
 }
 
 .dots::after {
