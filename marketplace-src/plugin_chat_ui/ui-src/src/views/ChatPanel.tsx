@@ -2056,11 +2056,10 @@ function MessageAttachments({ attachments }: { attachments: AttachmentInfo[] }) 
   )
 }
 
-// 071/072: the agent's reasoning trace. While `live` (the answer hasn't started)
-// the trace is the bubble's primary content — it streams into the chat in full
-// answer-body typography with no inner scroll clamp, so the timeline's own
-// auto-scroll follows it as it grows. Once done it folds into a compact
-// clickable "Thought Ns" pill (N = wall-seconds) that toggles the trace open.
+// 071/072: the agent's reasoning trace. While `live` (the answer hasn't
+// started) it streams inside a dim, height-capped panel — visually distinct
+// from the answer. Once done it folds into a bare "Thought Ns" text toggle at
+// the bubble's top right.
 export const ReasoningBlock = memo(function ReasoningBlock({
   text,
   ms,
@@ -2084,17 +2083,13 @@ export const ReasoningBlock = memo(function ReasoningBlock({
   if (live) {
     return (
       <div className="mb-1.5" data-testid="reasoning-live">
-        <div
-          className="flex items-center gap-1.5 text-[12px] text-luna-300 mb-1.5"
-          data-testid="reasoning-pill"
-        >
-          <Brain className="w-3.5 h-3.5" aria-hidden />
-          <span className="dots">Reasoning {seconds}s</span>
+        <div className="flex justify-end mb-1" data-testid="reasoning-pill">
+          <span className="text-[11px] text-ink-500 dots">Reasoning {seconds}s</span>
         </div>
         <div
           ref={bodyRef}
           data-testid="reasoning-text"
-          className="text-[13px] leading-relaxed text-ink-500 whitespace-pre-wrap max-h-[7.5rem] overflow-y-auto rounded-lg bg-black/20 border border-white/5 px-3 py-2"
+          className="text-[12px] leading-relaxed text-ink-600 whitespace-pre-wrap max-h-[7rem] overflow-y-auto rounded-lg bg-black/30 border border-white/5 px-3 py-2"
         >
           {text}
         </div>
@@ -2102,26 +2097,24 @@ export const ReasoningBlock = memo(function ReasoningBlock({
     )
   }
 
-  // Folded — a plain-text toggle (no pill chrome), aligned to the bubble's top
-  // right; the trace stays collapsed until clicked, then opens full-width below.
+  // Folded — bare text (no button chrome, no icons) at the bubble's top right;
+  // clicking toggles the trace, which opens in the same contained dim panel.
   return (
-    <div className="mb-2">
+    <div className="mb-1">
       <div className="flex justify-end">
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
-          className="inline-flex items-center gap-1 text-[12px] text-ink-500 hover:text-ink-300 transition"
+          className="text-[11px] text-ink-500 hover:text-ink-300 transition"
           data-testid="reasoning-pill"
         >
-          <Brain className="w-3 h-3" aria-hidden />
-          <span>Thought {seconds}s</span>
-          <ChevronDown className={cn('w-3 h-3 transition-transform', open && 'rotate-180')} />
+          Thought {seconds}s
         </button>
       </div>
       {open && (
         <div
           data-testid="reasoning-text"
-          className="mt-1.5 text-[13px] leading-relaxed text-ink-400 whitespace-pre-wrap border-l-2 border-luna-500/30 pl-3"
+          className="mt-1 text-[12px] leading-relaxed text-ink-500 whitespace-pre-wrap max-h-[10rem] overflow-y-auto rounded-lg bg-black/30 border border-white/5 px-3 py-2"
         >
           {text}
         </div>
