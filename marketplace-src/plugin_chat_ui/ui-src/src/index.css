@@ -53,6 +53,16 @@
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* 074: each streamed reasoning chunk arrives white, then fades to the
+   panel's dim ink (ink-600) so fresh thought is briefly highlighted. */
+.reasoning-seg {
+  animation: reasoningSegFade 1.4s ease-out both;
+}
+@keyframes reasoningSegFade {
+  from { color: #fafafa; }
+  to { color: #52525b; }
+}
+
 .dots::after {
   content: "";
   display: inline-block;

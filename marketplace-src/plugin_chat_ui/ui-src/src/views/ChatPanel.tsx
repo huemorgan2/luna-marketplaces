@@ -2073,6 +2073,19 @@ export const ReasoningBlock = memo(function ReasoningBlock({
   const seconds = Math.max(1, Math.round((ms ?? 0) / 1000))
   const bodyRef = useRef<HTMLDivElement | null>(null)
 
+  // 074: split the streamed text into arrival segments — each new chunk mounts
+  // its own span, whose .reasoning-seg animation fades white → dim ink.
+  const segsRef = useRef<string[]>([])
+  const prevTextRef = useRef('')
+  if (live && text !== prevTextRef.current) {
+    if (prevTextRef.current && text.startsWith(prevTextRef.current)) {
+      segsRef.current = [...segsRef.current, text.slice(prevTextRef.current.length)]
+    } else {
+      segsRef.current = [text]
+    }
+    prevTextRef.current = text
+  }
+
   // 072.2: while live, keep the streaming trace pinned to its newest line inside
   // a contained scrollbox, so it reads as a distinct, dimmer "thinking" panel
   // rather than the answer and never pushes the whole timeline around.
@@ -2091,7 +2104,9 @@ export const ReasoningBlock = memo(function ReasoningBlock({
           data-testid="reasoning-text"
           className="text-[12px] leading-relaxed text-ink-600 whitespace-pre-wrap max-h-[7rem] overflow-y-auto rounded-lg bg-black/30 border border-white/5 px-3 py-2"
         >
-          {text}
+          {segsRef.current.map((seg, i) => (
+            <span key={i} className="reasoning-seg">{seg}</span>
+          ))}
         </div>
       </div>
     )
@@ -2105,10 +2120,11 @@ export const ReasoningBlock = memo(function ReasoningBlock({
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
-          className="text-[11px] text-ink-500 hover:text-ink-300 transition"
+          className="inline-flex items-center gap-0.5 text-[11px] text-ink-500 hover:text-ink-300 transition"
           data-testid="reasoning-pill"
         >
           Thought {seconds}s
+          <ChevronDown className={cn('w-3 h-3 transition-transform', open && 'rotate-180')} />
         </button>
       </div>
       {open && (
