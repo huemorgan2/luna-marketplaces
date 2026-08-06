@@ -393,6 +393,10 @@ export function ChatPanel({
   >(null)
   // 007.007: context-window fullness ring under the composer.
   const [contextStatus, setContextStatus] = useState<ContextStatus | null>(null)
+  // 073/phase002+003: a condense pass is running (user /condense or the
+  // server's pre-turn blocking pass) — the composer is blocked and the
+  // timeline shows the condensing shimmer until it finishes.
+  const [condensing, setCondensing] = useState(false)
   // 005.8-polish: inline approval cards. The dispatch gate suspends a risky
   // tool call and fires `approval.requested` on /api/events; we render a card
   // below the agent's prose and the chat stream resumes once it's decided.
@@ -790,6 +794,11 @@ export function ChatPanel({
           ])
         },
         onUiEvent: handleUiEvent,
+        onCondenseStarted: () => setCondensing(true),
+        onCondenseDone: (r) => {
+          setCondensing(false)
+          if (r.context) setContextStatus(r.context)
+        },
         onDone: (_text, meta) => {
           flushDeltasNow()
           flushReasoningNow()
@@ -1416,6 +1425,34 @@ export function ChatPanel({
     const stagedItems = fromBridge ? [] : stagedRef.current.filter((x) => x.status !== 'error')
     if (!text && !stagedItems.length) return
 
+    // 073/phase002: /condense — summarize the conversation's older head now.
+    // A command, not a message: nothing is sent to the agent.
+    if (text === '/condense') {
+      if (!fromBridge) setInput('')
+      const condConvId = activeIdRef.current
+      if (!condConvId) {
+        addSystemLine('Nothing to condense — no conversation yet.')
+        return
+      }
+      if (streaming || condensing) {
+        addSystemLine('Busy — wait for the current turn to finish, then retry /condense.')
+        return
+      }
+      setCondensing(true)
+      try {
+        const r = await api.condense(condConvId)
+        if (r.context) setContextStatus(r.context)
+        addSystemLine(r.condensed
+          ? 'Conversation condensed — older messages folded into a summary.'
+          : 'Nothing to condense yet.')
+      } catch (e) {
+        addSystemLine(`Condense failed: ${(e as Error).message}`)
+      } finally {
+        setCondensing(false)
+      }
+      return
+    }
+
     // 031: while a turn is running, sending is WhatsApp-style — the message
     // shows as a normal bubble immediately and is queued server-side. The
     // running turn breaks at the next node boundary and a follow-up turn ingests
@@ -1567,6 +1604,13 @@ export function ChatPanel({
           }
         },
         onUiEvent: handleUiEvent,
+        // 073/phase003: server-side pre-turn condense — block the composer
+        // behind the condensing shimmer until the pass finishes.
+        onCondenseStarted: () => setCondensing(true),
+        onCondenseDone: (r) => {
+          setCondensing(false)
+          if (r.context) setContextStatus(r.context)
+        },
         onNotice: (n) => {
           setMessages((m) => [
             ...m,
@@ -1684,6 +1728,8 @@ export function ChatPanel({
       streamingRef.current = false
       setStopStage(0)
       setToolNames([])
+      // 073: a stream that died mid-condense must not leave the composer locked.
+      setCondensing(false)
       if (needsContinuation && convId && activeIdRef.current === convId) {
         const contId = convId
         setTimeout(() => {
@@ -1871,6 +1917,12 @@ export function ChatPanel({
             {timeline}
             {/* 049/phase02: the ONE subagent status line — shimmer while
                 running, settles to a muted summary, never becomes a log. */}
+            {/* 073: blocking condense — one shimmer line while the pass runs. */}
+            {condensing && (
+              <div data-testid="condense-line" className="flex items-center px-1 text-[12px] leading-5">
+                <span className="shimmer-text">Condensing conversation…</span>
+              </div>
+            )}
             {subagent && (
               <div data-testid="subagent-line" className="flex items-center px-1 text-[12px] leading-5">
                 <span
@@ -1915,6 +1967,7 @@ export function ChatPanel({
             onSubmit={send}
             focusRef={composerFocusRef}
             streaming={streaming}
+            condensing={condensing}
             stopStage={stopStage}
             onStop={handleStop}
             toolNames={toolNames}
@@ -2019,13 +2072,18 @@ export const ReasoningBlock = memo(function ReasoningBlock({
 }) {
   const [open, setOpen] = useState(false)
   const seconds = Math.max(1, Math.round((ms ?? 0) / 1000))
+  const bodyRef = useRef<HTMLDivElement | null>(null)
 
-  // 072: live — stream the reasoning prominently in-flow (replaces the old
-  // muted, height-clamped scrollbox and the "thinking" dots). The messages
-  // effect scrolls the timeline to follow, so no inner scroll is needed.
+  // 072.2: while live, keep the streaming trace pinned to its newest line inside
+  // a contained scrollbox, so it reads as a distinct, dimmer "thinking" panel
+  // rather than the answer and never pushes the whole timeline around.
+  useEffect(() => {
+    if (live && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
+  }, [text, live])
+
   if (live) {
     return (
-      <div className="mb-1" data-testid="reasoning-live">
+      <div className="mb-1.5" data-testid="reasoning-live">
         <div
           className="flex items-center gap-1.5 text-[12px] text-luna-300 mb-1.5"
           data-testid="reasoning-pill"
@@ -2034,8 +2092,9 @@ export const ReasoningBlock = memo(function ReasoningBlock({
           <span className="dots">Reasoning {seconds}s</span>
         </div>
         <div
+          ref={bodyRef}
           data-testid="reasoning-text"
-          className="text-[15px] leading-relaxed text-ink-200/90 whitespace-pre-wrap"
+          className="text-[13px] leading-relaxed text-ink-500 whitespace-pre-wrap max-h-[7.5rem] overflow-y-auto rounded-lg bg-black/20 border border-white/5 px-3 py-2"
         >
           {text}
         </div>
@@ -2043,19 +2102,22 @@ export const ReasoningBlock = memo(function ReasoningBlock({
     )
   }
 
-  // Folded — compact clickable pill; the trace stays collapsed until clicked.
+  // Folded — a plain-text toggle (no pill chrome), aligned to the bubble's top
+  // right; the trace stays collapsed until clicked, then opens full-width below.
   return (
     <div className="mb-2">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="inline-flex items-center gap-1.5 text-[12px] rounded-full px-2.5 py-1 border transition text-ink-400 border-white/10 bg-ink-800/60 hover:text-ink-200 hover:border-white/20"
-        data-testid="reasoning-pill"
-      >
-        <Brain className="w-3 h-3" aria-hidden />
-        <span>Thought {seconds}s</span>
-        <ChevronDown className={cn('w-3 h-3 transition-transform', open && 'rotate-180')} />
-      </button>
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="inline-flex items-center gap-1 text-[12px] text-ink-500 hover:text-ink-300 transition"
+          data-testid="reasoning-pill"
+        >
+          <Brain className="w-3 h-3" aria-hidden />
+          <span>Thought {seconds}s</span>
+          <ChevronDown className={cn('w-3 h-3 transition-transform', open && 'rotate-180')} />
+        </button>
+      </div>
       {open && (
         <div
           data-testid="reasoning-text"
@@ -2305,7 +2367,7 @@ function StagedChip({ item, onRemove }: { item: StagedAttachment; onRemove: () =
 }
 
 function Composer({
-  value, onChange, onSubmit, streaming, stopStage, onStop,
+  value, onChange, onSubmit, streaming, condensing = false, stopStage, onStop,
   toolNames, offline, contextStatus, staged, onAttach, onRemoveStaged,
   focusRef,
 }: {
@@ -2313,6 +2375,8 @@ function Composer({
   onChange: (v: string) => void
   onSubmit: () => void
   streaming: boolean
+  /** 073: a condense pass is running — input is blocked until it finishes. */
+  condensing?: boolean
   stopStage: 0 | 1 | 2
   onStop: () => void
   toolNames: string[]
@@ -2399,7 +2463,8 @@ function Composer({
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={handleKey}
             onPaste={handlePaste}
-            placeholder={streaming ? `Message ${name} — send anytime, it's read mid-turn…` : `Message ${name}…  (Shift+Enter for newline)`}
+            placeholder={condensing ? 'Condensing conversation…' : streaming ? `Message ${name} — send anytime, it's read mid-turn…` : `Message ${name}…  (Shift+Enter for newline)`}
+            disabled={condensing}
             rows={1}
             className="block w-full bg-transparent resize-none px-4 py-3 text-ink-50 placeholder-ink-500 outline-none"
             style={{ minHeight: 44 }}
@@ -2470,7 +2535,7 @@ function Composer({
             ) : (
               <button
                 onClick={onSubmit}
-                disabled={offline || !hasSendable}
+                disabled={offline || condensing || !hasSendable}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-luna-600 hover:bg-luna-500 disabled:bg-ink-800 disabled:text-ink-500 transition text-white text-sm font-medium py-1.5 px-3 max-md:py-2.5"
               >
                 <Send className="w-3.5 h-3.5" />

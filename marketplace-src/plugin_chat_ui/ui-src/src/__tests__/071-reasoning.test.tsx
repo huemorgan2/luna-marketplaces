@@ -17,15 +17,17 @@ describe('ReasoningBlock', () => {
     expect(screen.getByTestId('reasoning-text').textContent).toBe('weighing the options')
   })
 
-  it('streams the live trace in-flow — prominent, not a height-clamped box', () => {
+  it('contains the live trace in a dimmer internal scroll panel', () => {
     render(<ReasoningBlock text="weighing the options" ms={2400} live />)
-    // 072: the live trace uses answer-body typography and NO inner scroll clamp,
-    // so it streams into the timeline (which auto-scrolls to follow).
+    // 072.2: the live trace is a distinct, dimmer "thinking" panel — smaller
+    // muted type inside a height-capped box that scrolls internally (auto-pinned
+    // to the newest line) once it exceeds ~5 lines, so it never reads as the
+    // answer and doesn't shove the whole timeline around.
     const body = screen.getByTestId('reasoning-text')
     expect(screen.getByTestId('reasoning-live')).toBeTruthy()
-    expect(body.className).toContain('text-[15px]')
-    expect(body.className).not.toContain('max-h-44')
-    expect(body.className).not.toContain('overflow-y-auto')
+    expect(body.className).toContain('overflow-y-auto')
+    expect(body.className).toMatch(/max-h-/)
+    expect(body.className).not.toContain('text-[15px]')
   })
 
   it('folds to a Thought Ns pill that toggles the trace', () => {
