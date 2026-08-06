@@ -222,10 +222,64 @@ function chatUrlTransform(url: string): string {
   return defaultUrlTransform(url)
 }
 
+/** Fenced code blocks get a hover-revealed copy button. Same clipboard strategy
+ *  as the transcript copy: clipboard API first, execCommand fallback (the API
+ *  requires document focus; execCommand doesn't). */
+const PreWithCopy: Components['pre'] = ({ node: _node, children, ...props }) => {
+  const preRef = useRef<HTMLPreElement>(null)
+  const [copied, setCopied] = useState(false)
+  async function copyBlock() {
+    const text = preRef.current?.textContent ?? ''
+    if (!text) return
+    let ok = false
+    try {
+      await navigator.clipboard.writeText(text)
+      ok = true
+    } catch {
+      try {
+        const ta = document.createElement('textarea')
+        ta.value = text
+        ta.style.position = 'fixed'
+        ta.style.opacity = '0'
+        document.body.appendChild(ta)
+        ta.select()
+        ok = document.execCommand('copy')
+        document.body.removeChild(ta)
+      } catch {
+        ok = false
+      }
+    }
+    if (ok) {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1200)
+    }
+  }
+  return (
+    <div className="relative group/code">
+      <pre ref={preRef} {...props}>{children}</pre>
+      <button
+        type="button"
+        onClick={copyBlock}
+        aria-label="Copy code"
+        title={copied ? 'Copied!' : 'Copy'}
+        className={cn(
+          'absolute top-2 right-2 p-1.5 rounded-md border border-white/10 bg-black/40 backdrop-blur-sm transition-opacity',
+          copied
+            ? 'opacity-100 text-emerald-400'
+            : 'opacity-0 group-hover/code:opacity-100 focus-visible:opacity-100 text-ink-200 hover:text-white',
+        )}
+      >
+        {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+      </button>
+    </div>
+  )
+}
+
 /** Markdown renderers for assistant chat: images load eagerly (lazy breaks inside
  *  sandboxed embeds and adds nothing for an immediately-visible chat image) and
  *  degrade to alt text on error instead of a raw broken-image icon. */
 const chatMarkdownComponents: Components = {
+  pre: PreWithCopy,
   img: ({ src, alt, ...props }) => (
     <img
       {...props}
@@ -391,6 +445,22 @@ export function ChatPanel({
   const [subagent, setSubagent] = useState<
     { label: string; text: string; status: 'running' | 'done' | 'aborted' } | null
   >(null)
+  // 069: the agent called `wait` — one shimmer countdown line driven by
+  // ui.wait.* frames. `until` anchors a client-side tick; server ticks resync
+  // it (a reconnect shows the REMAINING time, not the original). `finished`
+  // flips it to "resuming…"; the next visible stream activity clears it.
+  const [waitLine, setWaitLine] = useState<
+    { until: number; reason: string; resuming: boolean } | null
+  >(null)
+  const [waitNow, setWaitNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!waitLine || waitLine.resuming) return
+    const t = window.setInterval(() => setWaitNow(Date.now()), 500)
+    return () => window.clearInterval(t)
+  }, [waitLine])
+  const clearWaitLine = useCallback(() => {
+    setWaitLine((prev) => (prev ? null : prev))
+  }, [])
   // 007.007: context-window fullness ring under the composer.
   const [contextStatus, setContextStatus] = useState<ContextStatus | null>(null)
   // 073/phase002+003: a condense pass is running (user /condense or the
@@ -508,6 +578,28 @@ export function ChatPanel({
       })
       return
     }
+    // 069: wait countdown — started/tick set the clock anchor, finished
+    // flips to "resuming…" (cleared by the next delta / turn end).
+    if (evt.type === 'ui.wait.started') {
+      setWaitLine({
+        until: Date.now() + Number(evt.seconds || 0) * 1000,
+        reason: String(evt.reason || ''),
+        resuming: false,
+      })
+      return
+    }
+    if (evt.type === 'ui.wait.tick') {
+      setWaitLine((prev) =>
+        prev && !prev.resuming
+          ? { ...prev, until: Date.now() + Number(evt.remaining || 0) * 1000 }
+          : prev,
+      )
+      return
+    }
+    if (evt.type === 'ui.wait.finished') {
+      setWaitLine((prev) => (prev ? { ...prev, resuming: true } : prev))
+      return
+    }
     if (evt.type === 'ui.tasks') {
       const tasks = (evt.tasks as PlanTask[]) ?? []
       setPlanTasks(tasks)
@@ -527,6 +619,11 @@ export function ChatPanel({
   useEffect(() => {
     if (streaming) clearPlanResuming()
   }, [streaming, clearPlanResuming])
+
+  // 069: a turn ending (done, stop, error) always retires the wait line.
+  useEffect(() => {
+    if (!streaming) clearWaitLine()
+  }, [streaming, clearWaitLine])
 
   // Agent task plan: backfill ONCE on mount, so a reload (or returning to the
   // chat) shows the plan without waiting for the next `ui.tasks` frame.
@@ -616,6 +713,7 @@ export function ChatPanel({
     )
   }, [])
   const queueDelta = useCallback((id: string, delta: string) => {
+    clearWaitLine() // 069: visible stream activity ends the wait line
     deltaBufRef.current.set(id, (deltaBufRef.current.get(id) ?? '') + delta)
     if (deltaRafRef.current === null) {
       deltaRafRef.current = requestAnimationFrame(() => {
@@ -623,7 +721,7 @@ export function ChatPanel({
         flushDeltasNow()
       })
     }
-  }, [flushDeltasNow])
+  }, [flushDeltasNow, clearWaitLine])
 
   // 071: same per-frame batching for the reasoning trace. Buffer per message id
   // carries accumulated text + the latest wall-ms so the folded pill can label
@@ -1935,6 +2033,21 @@ export function ChatPanel({
                   )}
                 >
                   {subagent.text}
+                </span>
+              </div>
+            )}
+            {/* 069: the wait countdown — shimmer "waiting Ns" ticking down
+                client-side; flips to "resuming…" at 0 / on finished, cleared
+                by the next visible stream activity. */}
+            {waitLine && (
+              <div data-testid="wait-line" className="flex items-center gap-1.5 px-1 text-[12px] leading-5">
+                <Clock className="w-3.5 h-3.5 text-ink-500 shrink-0" />
+                <span className="shimmer-text truncate">
+                  {waitLine.resuming || waitLine.until - waitNow <= 0
+                    ? 'resuming…'
+                    : `waiting ${Math.max(1, Math.ceil((waitLine.until - waitNow) / 1000))}s${
+                        waitLine.reason ? ` — ${waitLine.reason}` : ''
+                      }`}
                 </span>
               </div>
             )}
