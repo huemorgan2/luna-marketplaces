@@ -104,4 +104,41 @@ describe('045 plan card first paint', () => {
     render(<ChatPanel identity={null} />)
     expect(await screen.findByTestId('task-plan-card')).toBeTruthy()
   })
+
+  it('renders in the plan\'s home conversation, not in others', async () => {
+    h.planTasks.mockResolvedValue({
+      tasks: [TASK],
+      created_at: '2026-07-21T01:00:00Z',
+      conversation_id: 'c1',
+      turn_active: false,
+    })
+    render(<ChatPanel identity={null} />)
+    await waitFor(() => expect(h.messages).toHaveBeenCalledWith('c1'))
+    expect(await screen.findByTestId('task-plan-card')).toBeTruthy()
+  })
+
+  it('stays hidden in a conversation that is not the plan\'s home', async () => {
+    h.planTasks.mockResolvedValue({
+      tasks: [TASK],
+      created_at: '2026-07-21T01:00:00Z',
+      conversation_id: 'c-other',
+      turn_active: false,
+    })
+    render(<ChatPanel identity={null} />)
+    await waitFor(() => expect(h.messages).toHaveBeenCalledWith('c1'))
+    await waitFor(() => expect(h.planTasks).toHaveBeenCalled())
+    expect(screen.queryByTestId('task-plan-card')).toBeNull()
+  })
+
+  it('scrolls with the chat — the live card row is not sticky', async () => {
+    h.planTasks.mockResolvedValue({
+      tasks: [TASK],
+      created_at: '2026-07-21T01:00:00Z',
+      conversation_id: 'c1',
+      turn_active: false,
+    })
+    render(<ChatPanel identity={null} />)
+    const card = await screen.findByTestId('task-plan-card')
+    expect(card.parentElement?.className ?? '').not.toContain('sticky')
+  })
 })

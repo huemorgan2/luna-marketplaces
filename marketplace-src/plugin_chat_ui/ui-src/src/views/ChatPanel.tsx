@@ -30,6 +30,7 @@ import { useDebugMode } from '@luna/lib/useDebugMode'
 import { InlineApprovalCard, humanizeTool } from '@luna/views/InlineApprovalCard'
 import { InlineSecretForm } from './InlineSecretForm'
 import { TaskPlanCard } from './TaskPlanCard'
+import { composerWidgets } from '../lib/composerWidgets'
 import { groupApprovals, isAutoApproved, type ApprovalRecord } from '@luna/lib/approvalGroups'
 import { AgentAvatar } from '@luna/components/AgentAvatar'
 import { ModelPickerMenu } from '@luna/components/ModelPickerMenu'
@@ -482,9 +483,14 @@ export function ChatPanel({
     () => cachedGet<{ tasks: PlanTask[]; created_at: string | null }>('plan-tasks')?.tasks ?? [],
   )
   // 026: when the plan started — anchors the live card chronologically in the
-  // timeline (it then sticks to the top of the viewport while active).
+  // timeline at its creation point (it scrolls with the chat).
   const [planCreatedAt, setPlanCreatedAt] = useState<string | null>(
     () => cachedGet<{ tasks: PlanTask[]; created_at: string | null }>('plan-tasks')?.created_at ?? null,
+  )
+  // The plan's home conversation — the live card renders ONLY there, never in
+  // other chats. Every ui.tasks frame and the backfill carry conversation_id.
+  const [planConversationId, setPlanConversationId] = useState<string | null>(
+    () => cachedGet<{ conversation_id?: string | null }>('plan-tasks')?.conversation_id ?? null,
   )
   // 043: server-truth "a turn is live for this plan" — the ONLY non-local
   // signal allowed to animate the card. Persisted in_progress rows are not.
@@ -604,6 +610,7 @@ export function ChatPanel({
       const tasks = (evt.tasks as PlanTask[]) ?? []
       setPlanTasks(tasks)
       setPlanCreatedAt((evt.created_at as string | null) ?? null)
+      setPlanConversationId((evt.conversation_id as string | null) ?? null)
       setPlanTurnActive(!!evt.turn_active)
       // 038/phase04: an accepted resume re-emits the plan with resuming: true
       // (flips every tab); visible work (in_progress) clears the state.
@@ -639,6 +646,7 @@ export function ChatPanel({
         if (cancelled) return
         setPlanTasks(r.tasks ?? [])
         setPlanCreatedAt(r.created_at ?? null)
+        setPlanConversationId(r.conversation_id ?? null)
         setPlanTurnActive(!!r.turn_active)
       })
       .catch(() => { /* plugin absent or endpoint down — no card */ })
@@ -647,8 +655,8 @@ export function ChatPanel({
 
   // 045/phase05: write-through so the seed above always has the last snapshot.
   useEffect(() => {
-    cachedSet('plan-tasks', { tasks: planTasks, created_at: planCreatedAt })
-  }, [planTasks, planCreatedAt])
+    cachedSet('plan-tasks', { tasks: planTasks, created_at: planCreatedAt, conversation_id: planConversationId })
+  }, [planTasks, planCreatedAt, planConversationId])
 
   // 043: while the card animates off a server-side turn (not this tab's
   // stream), re-poll so a crashed/vanished turn decays to a static card — the
@@ -661,6 +669,7 @@ export function ChatPanel({
         .then((r) => {
           setPlanTasks(r.tasks ?? [])
           setPlanCreatedAt(r.created_at ?? null)
+          setPlanConversationId(r.conversation_id ?? null)
           setPlanTurnActive(!!r.turn_active)
         })
         .catch(() => setPlanTurnActive(false))
@@ -1035,6 +1044,7 @@ export function ChatPanel({
         onUiTasks: (info) => {
           setPlanTasks((info.tasks as PlanTask[]) ?? [])
           setPlanCreatedAt(info.created_at ?? null)
+          setPlanConversationId(info.conversation_id ?? null)
           setPlanTurnActive(!!info.turn_active)
         },
         // 006.712: live append of messages posted outside the chat stream
@@ -1047,6 +1057,7 @@ export function ChatPanel({
           if (info.kind === 'task_plan') {
             setPlanTasks([])
             setPlanCreatedAt(null)
+            setPlanConversationId(null)
           }
           if (info.conversation_id !== activeIdRef.current) return
           // 008.994: a muted line arrives as role="user" + kind="muted"; the
@@ -1897,12 +1908,15 @@ export function ChatPanel({
     debugMode ? debugEvents : null,
     secretReqs,
     onSecretResolvedCb,
-    // 026: live plan card — interleaved at the plan's creation time and
-    // sticky at the top of the viewport while the agent works. A completed
-    // plan is a persisted kind==="task_plan" message instead; an empty
-    // `ui.tasks` clears this one. 045/phase05: no loadingMessages gate — the
-    // card paints from the first successful fetch (= 044 Bug 20).
-    planTasks,
+    // 026: live plan card — interleaved at the plan's creation time, inline
+    // in the timeline (it scrolls with the chat). A completed plan is a
+    // persisted kind==="task_plan" message instead; an empty `ui.tasks`
+    // clears this one. 045/phase05: no loadingMessages gate — the card paints
+    // from the first successful fetch (= 044 Bug 20).
+    // The card renders ONLY in its home conversation — other chats never see
+    // it. A plan with no conversation_id (legacy rows) falls back to
+    // rendering wherever the user is so it stays reachable.
+    planConversationId == null || planConversationId === activeId ? planTasks : [],
     planCreatedAt,
     // 043: spinner honesty — animate ONLY off a live signal: this tab's
     // stream, or the server's turn registry saying a turn is running for the
@@ -1918,7 +1932,7 @@ export function ChatPanel({
     messages, approvals, activeId,
     identity?.emoji, identity?.avatar_url, identity?.name,
     debugMode, debugEvents, secretReqs, onSecretResolvedCb,
-    planTasks, planCreatedAt, streaming, planInProgress, planTurnActive,
+    planTasks, planCreatedAt, planConversationId, streaming, planInProgress, planTurnActive,
     onPlanResume, onPlanDismiss, planResuming, planCollapsed, togglePlanCollapsed,
   ])
 
@@ -2073,6 +2087,13 @@ export function ChatPanel({
               New messages <ChevronDown className="w-3.5 h-3.5" />
             </button>
           )}
+
+          {/* 010 (006): composer widget zone — transparent, self-hiding
+              native widgets floating above the message box. Empty widgets
+              render null, so the zone contributes nothing when idle. */}
+          <div className="max-w-3xl mx-auto px-6 flex flex-col gap-2">
+            {composerWidgets.map(({ id, Component }) => <Component key={id} />)}
+          </div>
 
           <Composer
             value={input}
@@ -2556,8 +2577,10 @@ function Composer({
     el.style.height = `${Math.max(44, Math.min(el.scrollHeight, max))}px`
     el.style.overflowY = el.scrollHeight > max ? 'auto' : 'hidden'
   }, [value])
+  // 010 (006): no hairline, no dark slab — the composer floats over the
+  // chat; the visible box below keeps its own background.
   return (
-    <div className="border-t border-white/5 bg-ink-950/40 px-6 py-4">
+    <div className="px-6 py-4">
       <div className="max-w-3xl mx-auto">
         {/* 043 item 6: the box is `relative` and the Send/Stop buttons OVERLAY
             its bottom-right corner — text keeps flowing on the button's line
@@ -3351,16 +3374,16 @@ export function renderTimeline(
             : <MemoBubble key={`m-${m.id}`} message={m} emoji={emoji} avatarUrl={avatarUrl} />,
     }),
   )
-  // 026: the LIVE plan card — inline at the plan's creation time; `sticky`
-  // pins it to the top of the scroll viewport once the chat scrolls past it,
-  // and it lingers there until the plan completes (then an anchored
-  // kind==="task_plan" message replaces it and this card goes away).
+  // 026: the LIVE plan card — inline at the plan's creation time, a normal
+  // timeline row that scrolls with the chat (it lives only in the plan's home
+  // conversation; when the plan completes an anchored kind==="task_plan"
+  // message replaces it and this card goes away).
   if (planTasks && planTasks.length > 0) {
     items.push({
       ts: planCreatedAt ? ts(planCreatedAt) : Number.MAX_SAFE_INTEGER,
       order: 3_000_000,
       node: (
-        <div key="task-plan-live" className="sticky top-0 z-20 flex gap-3 fade-in justify-start">
+        <div key="task-plan-live" className="flex gap-3 fade-in justify-start">
           <div className="w-8 shrink-0" />
           <TaskPlanCard
             tasks={planTasks}
@@ -3370,7 +3393,6 @@ export function renderTimeline(
             onToggleCollapse={onPlanToggleCollapse}
             onResume={onPlanResume}
             onDismiss={onPlanDismiss}
-            className="bg-ink-950/95 backdrop-blur-sm shadow-lg shadow-black/30"
           />
         </div>
       ),
