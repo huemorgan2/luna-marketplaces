@@ -18,7 +18,7 @@
  *    primary action) and a quiet ✕ (dismiss a plan that is simply obsolete).
  */
 
-import { Circle, CheckCircle2, ChevronDown, Loader2, AlertTriangle, Minus, XCircle, ListTodo, Play, X } from 'lucide-react'
+import { Circle, CheckCircle2, ChevronDown, Clock, Loader2, AlertTriangle, Minus, OctagonAlert, XCircle, ListTodo, Play, X } from 'lucide-react'
 import { cn } from '@luna/lib/cn'
 import type { PlanTask, PlanSnapshotTask } from '@luna/lib/api'
 
@@ -38,11 +38,60 @@ function StatusGlyph({ status, working }: { status: PlanTask['status']; working:
       )
     case 'blocked':
       return <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5 text-amber-400" />
+    case 'stalled':
+      // 075/phase7: parked with a verdict — visually louder than blocked.
+      return <OctagonAlert className="h-3.5 w-3.5 shrink-0 mt-0.5 text-red-400" />
+    case 'expired':
+      // 075/phase7: TTL-swept — the plan aged out before finishing.
+      return <Clock className="h-3.5 w-3.5 shrink-0 mt-0.5 text-ink-500" />
     case 'cancelled':
       return <XCircle className="h-3.5 w-3.5 shrink-0 mt-0.5 text-ink-500" />
     default: // open
       return <Circle className="h-3.5 w-3.5 shrink-0 mt-0.5 text-ink-500" />
   }
+}
+
+// 075/phase7: one honest line about WHY nothing is happening. "Paused" is
+// reserved for "the owner paused it / nothing is scheduled" — a waiting wake,
+// an ask on the owner, a stalled verdict and an expired plan each say so.
+function pausedStateLine(sorted: CardTask[]): string {
+  const blocked = sorted.find((t) => t.status === 'blocked')
+  if (blocked) {
+    const wake = 'wake_at' in blocked ? blocked.wake_at || '' : ''
+    if (wake.startsWith('event:')) return `waiting — resumes when '${wake.slice(6)}' fires`
+    if (wake) {
+      const d = new Date(wake)
+      if (!isNaN(d.getTime())) {
+        const hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        return `waiting — wakes ${hm}`
+      }
+    }
+    return blocked.blocked_reason
+      ? `blocked on you: ${blocked.blocked_reason}`
+      : 'blocked — the agent is waiting on you'
+  }
+  const stalled = sorted.find((t) => t.status === 'stalled')
+  if (stalled) {
+    const verdict = stalled.blocked_reason || ''
+    // Watchdog cap-park verdicts already start with "stalled:" — don't stutter.
+    if (!verdict) return 'stalled'
+    return verdict.startsWith('stalled') ? verdict : `stalled: ${verdict}`
+  }
+  if (sorted.some((t) => t.status === 'expired')) {
+    return 'expired — this plan aged out before finishing'
+  }
+  return 'paused — the agent isn’t working on this right now'
+}
+
+// 075/phase7: attempt-ledger badge (HEAD row) — burning retries without
+// progress and ceiling-cut resumes are owner-visible, not silent.
+function ledgerBadge(head: CardTask | undefined): string | null {
+  if (!head || !('attempts' in head)) return null
+  const attempts = head.attempts ?? 0
+  const outcome = head.last_attempt_outcome ?? ''
+  if (outcome === 'aborted') return 'last resume hit its usage ceiling — resumable'
+  if (outcome === 'no_progress' && attempts >= 2) return `${attempts} resume attempts without progress`
+  return null
 }
 
 const MUTED_LABELS: Record<string, string> = {
@@ -169,13 +218,38 @@ export function TaskPlanCard({
               >
                 {t.title}
               </div>
-              {t.status === 'blocked' && t.blocked_reason && (
+              {(t.status === 'blocked' || t.status === 'stalled') && t.blocked_reason && (
+                // 075/phase7: blocked shows the ask; stalled shows the verdict.
                 <div className="text-[11px] text-ink-500">{t.blocked_reason}</div>
               )}
             </div>
           </li>
         ))}
       </ul>
+      {variant === 'active' && !allDone && (() => {
+        // 075/phase7: honest state surfaces — resume note + ledger badge show
+        // whenever the plan is live; the state line replaces blanket "paused".
+        const head = sorted[0]
+        const note = head && 'resume_note' in head ? head.resume_note || '' : ''
+        const badge = ledgerBadge(head)
+        return (
+          <>
+            {note && (
+              <div data-testid="task-plan-note" className="mt-2 text-[11px] text-ink-400">
+                <span className="text-ink-500">Next action:</span> {note}
+              </div>
+            )}
+            {badge && (
+              <div
+                data-testid="task-plan-ledger"
+                className="mt-1.5 inline-flex rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-300/90"
+              >
+                {badge}
+              </div>
+            )}
+          </>
+        )
+      })()}
       {paused && onResume && (
         <div className="mt-2.5 pt-2.5 border-t border-white/5 flex items-center gap-2">
           <button
@@ -191,10 +265,8 @@ export function TaskPlanCard({
             {resuming ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
             {resuming ? 'Resuming…' : 'Resume'}
           </button>
-          <span className="text-[11px] text-ink-500">
-            {resuming
-              ? 'nudging the agent to continue…'
-              : 'paused — the agent isn’t working on this right now'}
+          <span data-testid="task-plan-state" className="text-[11px] text-ink-500">
+            {resuming ? 'nudging the agent to continue…' : pausedStateLine(sorted)}
           </span>
         </div>
       )}
