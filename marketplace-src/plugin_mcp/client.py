@@ -157,7 +157,7 @@ class MCPClient:
                     {
                         "name": t.name,
                         "description": t.description or "",
-                        "input_schema": t.inputSchema or {"type": "object", "properties": {}},
+                        "input_schema": t.input_schema or {"type": "object", "properties": {}},
                         "destructive": destructive,
                         "read_only": read_only,
                     }
