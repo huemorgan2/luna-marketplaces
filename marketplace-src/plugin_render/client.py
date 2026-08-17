@@ -10,9 +10,9 @@ API_BASE = "https://api.render.com/v1"
 
 
 class RenderClient:
-    def __init__(self, api_key: str) -> None:
+    def __init__(self, api_key: str, base_url: str | None = None) -> None:
         self._http = httpx.AsyncClient(
-            base_url=API_BASE,
+            base_url=base_url or API_BASE,
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=30.0,
         )

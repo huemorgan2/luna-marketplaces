@@ -31,6 +31,7 @@ _SETTINGS_DIR = Path(__file__).parent / "interface" / "webui" / "settings"
 
 class _ConnectReq(BaseModel):
     api_key: str
+    base_url: str | None = None
 
 
 class _StatusResp(BaseModel):
@@ -51,7 +52,7 @@ def register_routes(app, ctx):
     async def connect(body: _ConnectReq, user=Depends(get_current_user)):
         vault = _vault()
 
-        client = RenderClient(body.api_key)
+        client = RenderClient(body.api_key, base_url=body.base_url)
         try:
             services = await client.list_services()
         except Exception as e:
@@ -61,7 +62,7 @@ def register_routes(app, ctx):
             await client.close()
 
         await vault.store_credential(VAULT_KEY, body.api_key, kind="api_key")
-        set_client(RenderClient(body.api_key))
+        set_client(RenderClient(body.api_key, base_url=body.base_url))
 
         return {"connected": True, "service_count": len(services)}
 
