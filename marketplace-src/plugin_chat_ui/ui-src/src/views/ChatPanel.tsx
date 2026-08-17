@@ -30,6 +30,7 @@ import { useDebugMode } from '@luna/lib/useDebugMode'
 import { InlineApprovalCard, humanizeTool } from '@luna/views/InlineApprovalCard'
 import { InlineSecretForm } from './InlineSecretForm'
 import { TaskPlanCard } from './TaskPlanCard'
+import { LiveRunList, applyLiveEvent, isLiveEvent, type LiveEvent, type LiveRun } from './LiveRunBlock'
 import { composerWidgets } from '../lib/composerWidgets'
 import { groupApprovals, isAutoApproved, type ApprovalRecord } from '@luna/lib/approvalGroups'
 import { AgentAvatar } from '@luna/components/AgentAvatar'
@@ -343,6 +344,10 @@ interface UIMessage {
   // wall-ms spent thinking (÷1000 = the pill's N).
   reasoning?: string
   reasoning_ms?: number
+  // 078: live tool runs (ui.live.* frames) attached to this bubble while its
+  // turn streams — code shown at once, output as it happens, folds on close.
+  // Not persisted; a reload renders the tool's embed_iframe card instead.
+  live_runs?: LiveRun[]
 }
 
 // 008.95: a file staged in the composer, uploading (or awaiting a
@@ -769,6 +774,52 @@ export function ChatPanel({
     }
   }, [flushReasoningNow])
 
+  // 078: live tool-run frames (ui.live.*). open/close apply at once (they are
+  // rare boundaries); append is coalesced per frame like deltas so a chatty
+  // script cannot re-render the timeline per line.
+  const liveBufRef = useRef<Map<string, LiveEvent[]>>(new Map())
+  const liveRafRef = useRef<number | null>(null)
+  const flushLiveNow = useCallback(() => {
+    if (liveRafRef.current !== null) {
+      cancelAnimationFrame(liveRafRef.current)
+      liveRafRef.current = null
+    }
+    const buf = liveBufRef.current
+    if (buf.size === 0) return
+    liveBufRef.current = new Map()
+    const now = Date.now()
+    setMessages((m) =>
+      m.map((msg) => {
+        const evts = buf.get(msg.id)
+        if (!evts) return msg
+        let runs = msg.live_runs
+        for (const e of evts) runs = applyLiveEvent(runs, e, now)
+        return runs === msg.live_runs ? msg : { ...msg, live_runs: runs }
+      }),
+    )
+  }, [])
+  const queueLive = useCallback((id: string, evt: LiveEvent) => {
+    const list = liveBufRef.current.get(id) ?? []
+    list.push(evt)
+    liveBufRef.current.set(id, list)
+    if (evt.type === 'ui.live.append') {
+      if (liveRafRef.current === null) {
+        liveRafRef.current = requestAnimationFrame(() => {
+          liveRafRef.current = null
+          flushLiveNow()
+        })
+      }
+    } else {
+      flushLiveNow()
+    }
+  }, [flushLiveNow])
+  /** Route a ui_event frame: live-run frames go to the pending bubble, the
+   *  rest to the shell-level handler. */
+  const routeUiEvent = useCallback((msgId: string, evt: { type: string; [key: string]: any }) => {
+    if (isLiveEvent(evt)) queueLive(msgId, evt as LiveEvent)
+    else handleUiEvent(evt)
+  }, [queueLive, handleUiEvent])
+
   // 006.7: trigger a headless agent turn so the model can respond to a
   // rejection that landed after the original SSE stream closed.
   function triggerContinuation(convId: string) {
@@ -796,7 +847,7 @@ export function ChatPanel({
           { id, role: 'assistant', content: '', pending: true, created_at: new Date().toISOString() },
         ])
       },
-      onUiEvent: handleUiEvent,
+      onUiEvent: (evt) => routeUiEvent(currentMsgId, evt),
       onNotice: (n) => {
         setMessages((m) => [
           ...m,
@@ -826,6 +877,7 @@ export function ChatPanel({
       onDone: (_text, meta) => {
         flushDeltasNow()
         flushReasoningNow()
+        flushLiveNow()
         // 036/phase02: a superseded draft is persisted server-side as
         // superseded_partial — keep it (dimmed/collapsed), never a silent void.
         setMessages((m) =>
@@ -850,6 +902,7 @@ export function ChatPanel({
       .finally(() => {
         flushDeltasNow()
         flushReasoningNow()
+        flushLiveNow()
         setStreaming(false)
         streamingRef.current = false
         if (needsChain && activeIdRef.current === convId) {
@@ -900,7 +953,7 @@ export function ChatPanel({
             { id, role: 'assistant', content: '', pending: true, created_at: new Date().toISOString() },
           ])
         },
-        onUiEvent: handleUiEvent,
+        onUiEvent: (evt) => routeUiEvent(currentMsgId, evt),
         onCondenseStarted: () => setCondensing(true),
         onCondenseDone: (r) => {
           setCondensing(false)
@@ -909,6 +962,7 @@ export function ChatPanel({
         onDone: (_text, meta) => {
           flushDeltasNow()
           flushReasoningNow()
+          flushLiveNow()
           // 036/phase02: the superseded draft IS in the DB (superseded_partial)
           // — drop only the local pending bubble; resync renders the truth,
           // including the ⏹ turn_stopped marker row.
@@ -926,6 +980,7 @@ export function ChatPanel({
         onClosed: () => {
           flushDeltasNow()
           flushReasoningNow()
+          flushLiveNow()
           setMessages((m) => m.map((msg) => (msg.pending ? { ...msg, pending: false } : msg)))
           resync()
         },
@@ -1718,7 +1773,7 @@ export function ChatPanel({
             })
           }
         },
-        onUiEvent: handleUiEvent,
+        onUiEvent: (evt) => routeUiEvent(currentMsgId, evt),
         // 073/phase003: server-side pre-turn condense — block the composer
         // behind the condensing shimmer until the pass finishes.
         onCondenseStarted: () => setCondensing(true),
@@ -1765,6 +1820,7 @@ export function ChatPanel({
         onDone: (_text, meta) => {
           flushDeltasNow()
           flushReasoningNow()
+          flushLiveNow()
           // 036/phase02: a superseded draft stays visible as a dimmed,
           // collapsed "interrupted" bubble (persisted server-side as
           // superseded_partial); the follow-up turn still owns THE reply.
@@ -1797,6 +1853,7 @@ export function ChatPanel({
         onError: (err) => {
           flushDeltasNow()
           flushReasoningNow()
+          flushLiveNow()
           setMessages((m) =>
             m.map((msg) =>
               msg.id === currentMsgId
@@ -1824,6 +1881,7 @@ export function ChatPanel({
         onClosed: () => {
           flushDeltasNow()
           flushReasoningNow()
+          flushLiveNow()
           const convId = activeIdRef.current
           setMessages((m) => m.map((msg) => (msg.pending ? { ...msg, pending: false } : msg)))
           if (convId) {
@@ -2319,6 +2377,10 @@ function Bubble({ message, emoji, avatarUrl }: { message: UIMessage; emoji: stri
           // 031: a message sent while the agent works shows immediately, dimmed
           // until the server acks the queue (then it becomes a normal bubble).
           message.queued && 'opacity-60',
+          // 078: a bubble carrying a live run block or a tool card takes the
+          // full column (capped at 80%) — code and output need the width; a
+          // shrink-to-fit bubble would squeeze them to the iframe's 300px.
+          (!!message.live_runs?.length || !!message.embed_iframe) && 'w-full',
         )}
       >
         {isUser ? (
@@ -2356,10 +2418,13 @@ function Bubble({ message, emoji, avatarUrl }: { message: UIMessage; emoji: stri
             </div>
           </>
         )}
-        {message.pending && !message.content && !message.reasoning && (
+        {message.pending && !message.content && !message.reasoning && !message.live_runs?.length && (
           <span className="text-ink-500 text-sm dots">thinking</span>
         )}
-        {message.embed_iframe && (
+        {message.live_runs && message.live_runs.length > 0 && (
+          <LiveRunList runs={message.live_runs} />
+        )}
+        {message.embed_iframe && !message.live_runs?.length && (
           <PluginEmbed html={message.embed_iframe} asIframe />
         )}
         {message.embed_html && !message.embed_iframe && (
