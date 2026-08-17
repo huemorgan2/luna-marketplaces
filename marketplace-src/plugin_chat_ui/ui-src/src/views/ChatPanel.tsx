@@ -1064,7 +1064,13 @@ export function ChatPanel({
           // agent's reply arrives as role="assistant". Honor the role/kind from
           // the event instead of assuming assistant.
           const role = (info.role === 'user' ? 'user' : 'assistant') as UIMessage['role']
-          setMessages((m) => {
+          setMessages((m0) => {
+            // 076: an assistant reply landing means the server drained the
+            // queue — every earlier "Sending…" user bubble has been handled.
+            const m =
+              role === 'assistant' && m0.some((x) => x.queued)
+                ? m0.map((x) => (x.queued ? { ...x, queued: false } : x))
+                : m0
             if (m.some((msg) => msg.id === info.message_id)) return m
             const msg: UIMessage = {
               id: info.message_id,
