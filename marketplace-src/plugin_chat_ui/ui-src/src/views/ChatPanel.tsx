@@ -88,7 +88,7 @@ async function fetchEmbedAssetAsDataUrl(rawPath: string): Promise<string | null>
 }
 
 /**
- * Renders a plugin chat embed. Plugin embeds run in a `sandbox="allow-scripts"`
+ * Renders a plugin chat embed. Plugin embeds run in a `sandbox="allow-scripts allow-downloads"`
  * iframe (opaque origin) that cannot send the session cookie, so an
  * authenticated same-origin asset (e.g. a generated image) 401s and shows as
  * broken. We pre-fetch such assets in the parent and inline them as `data:` URLs
@@ -205,7 +205,7 @@ function PluginEmbed({
         srcDoc={prepared}
         className={cn('w-full border-0 rounded-xl', !card && 'mt-2')}
         style={height !== null ? { height } : { minHeight: 300, maxHeight: 500 }}
-        sandbox="allow-scripts"
+        sandbox="allow-scripts allow-downloads"
       />
     )
   }
