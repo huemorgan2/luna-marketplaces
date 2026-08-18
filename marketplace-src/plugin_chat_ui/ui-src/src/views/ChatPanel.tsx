@@ -323,6 +323,11 @@ interface UIMessage {
   notice?: { from?: string; to?: string; reason?: string }
   // 039: the billing gateway refused the turn (402) — action-required banner.
   policy_block?: { code?: string; message?: string; retryable?: boolean }
+  // 080: kind === 'turn_error' — the turn failed with a typed, honest notice
+  // (live SSE `turn_error`/`error`, or a persisted row's extra). `content` is
+  // the plain-language message; `retryable` drives the Retry button.
+  error_code?: string | null
+  retryable?: boolean | null
   // 008.9: a centered muted status line (e.g. "Stopping agent…").
   system_line?: boolean
   // 031: a user message sent while the agent was working — shown as a normal
@@ -553,6 +558,55 @@ export function ChatPanel({
       },
     ])
   }, [])
+
+  // 080: the turn failed with a typed notice. Any prose already streamed into
+  // the pending bubble stays (finished, not pending); the failure itself is a
+  // separate `turn_error` card — the same shape the server persists, so a
+  // reload shows exactly what the live stream showed. Delta flushing is the
+  // caller's job (it owns the flush refs).
+  const applyTurnError = useCallback((msgId: string, n: { code: string; message: string; retryable: boolean }) => {
+    setMessages((m) => {
+      const idx = m.findIndex((x) => x.id === msgId)
+      const card: UIMessage = {
+        id: `turn-error-${Date.now()}`,
+        role: 'assistant',
+        content: n.message,
+        kind: 'turn_error',
+        error_code: n.code,
+        retryable: n.retryable,
+        created_at: new Date().toISOString(),
+      }
+      if (idx < 0) return [...m, card]
+      const cur = m[idx]
+      if (!cur.content.trim() && !cur.reasoning) {
+        // Empty pending bubble → becomes the card (keeps the row position/id).
+        const copy = [...m]
+        copy[idx] = { ...cur, ...card, id: cur.id, pending: false }
+        return copy
+      }
+      const copy = m.map((x) => (x.id === msgId ? { ...x, pending: false } : x))
+      copy.splice(idx + 1, 0, card)
+      return copy
+    })
+  }, [])
+
+  // 080: Retry on an error card resends the user message that preceded it.
+  // Plain function (not memoized): it must see the current `messages` and the
+  // current `send` closure.
+  function retryAfterError(cardId: string) {
+    const list = messages
+    const idx = list.findIndex((x) => x.id === cardId)
+    let text = ''
+    for (let i = (idx < 0 ? list.length : idx) - 1; i >= 0; i--) {
+      if (list[i].role === 'user' && list[i].content.trim()) { text = list[i].content; break }
+    }
+    if (!text) text = lastUserTextRef.current
+    if (!text) return
+    void send(text)
+  }
+  const retryAfterErrorRef = useRef(retryAfterError)
+  retryAfterErrorRef.current = retryAfterError
+  const onTurnErrorRetryCb = useCallback((cardId: string) => retryAfterErrorRef.current(cardId), [])
 
   // 007.011: track whether the user is scrolled to the bottom
   const handleScroll = useCallback(() => {
@@ -873,6 +927,13 @@ export function ChatPanel({
             created_at: new Date().toISOString(),
           },
         ])
+      },
+      // 080: honest failure card (storage down, model 4xx, …).
+      onTurnError: (n) => {
+        flushDeltasNow()
+        flushReasoningNow()
+        flushLiveNow()
+        applyTurnError(currentMsgId, n)
       },
       onDone: (_text, meta) => {
         flushDeltasNow()
@@ -1817,6 +1878,14 @@ export function ChatPanel({
           currentMsgId = id
           setMessages((m) => [...m, newMsg])
         },
+        // 080: the turn failed with a typed notice — render the error card
+        // (with Retry when retryable) instead of raw prose or "Stream failed".
+        onTurnError: (n) => {
+          flushDeltasNow()
+          flushReasoningNow()
+          flushLiveNow()
+          applyTurnError(currentMsgId, n)
+        },
         onDone: (_text, meta) => {
           flushDeltasNow()
           flushReasoningNow()
@@ -1992,12 +2061,14 @@ export function ChatPanel({
     planResuming,
     planCollapsed,
     togglePlanCollapsed,
+    onTurnErrorRetryCb,
+    streaming,
   ), [
     messages, approvals, activeId,
     identity?.emoji, identity?.avatar_url, identity?.name,
     debugMode, debugEvents, secretReqs, onSecretResolvedCb,
     planTasks, planCreatedAt, planConversationId, streaming, planInProgress, planTurnActive,
-    onPlanResume, onPlanDismiss, planResuming, planCollapsed, togglePlanCollapsed,
+    onPlanResume, onPlanDismiss, planResuming, planCollapsed, togglePlanCollapsed, onTurnErrorRetryCb,
   ])
 
   // 057 phase04: mobile = conversations list as StackPane root, the active
@@ -3355,6 +3426,9 @@ export function renderTimeline(
   // 043: the live card folds to a one-line pill; remembered per plan.
   planCollapsed?: boolean,
   onPlanToggleCollapse?: () => void,
+  // 080: error-card Retry (disabled while a turn is streaming).
+  onTurnErrorRetry?: (cardId: string) => void,
+  turnErrorRetryDisabled?: boolean,
 ) {
   const ts = (s?: string | null) => (s ? Date.parse(s) : 0)
   const visible = messages.filter(
@@ -3434,6 +3508,10 @@ export function renderTimeline(
         ? <InterruptedDraft key={`ip-${m.id}`} content={m.content} />
         // 039: billing gateway refused the turn — persisted marker (kind) or
         // live SSE event (policy_block) both render the action-required banner.
+        // 080: the turn failed — honest card (persisted kind or live event),
+        // Retry resends the preceding user message once the cause has passed.
+        : m.kind === 'turn_error'
+        ? <TurnErrorCard key={`te-${m.id}`} message={m} disabled={turnErrorRetryDisabled} onRetry={() => onTurnErrorRetry?.(m.id)} />
         : m.kind === 'policy_blocked'
         ? <PolicyBlockedBanner key={`pb-${m.id}`} block={{ message: m.content.replace(/^⚠ /, '') }} />
         : m.policy_block
@@ -3627,6 +3705,48 @@ function PolicyBlockedBanner({ block }: { block: { code?: string; message?: stri
   )
 }
 
+// 080: a turn that failed with a typed notice. Unlike a fallback notice this
+// is a STOP for the turn; unlike the billing banner it is usually transient
+// (storage refused connections, provider hiccup) — so it offers Retry, which
+// resends the message that preceded it. The headline is plain language; the
+// code is shown small for support; the raw exception never reaches the UI.
+const TURN_ERROR_LABEL: Record<string, string> = {
+  storage_unavailable: 'Storage unavailable',
+  context_overflow: 'Context limit reached',
+  history_corrupt: 'History problem',
+  model_error: 'Model error',
+  internal: 'Something went wrong',
+}
+function TurnErrorCard({ message, disabled, onRetry }: { message: UIMessage; disabled?: boolean; onRetry: () => void }) {
+  const code = message.error_code || 'internal'
+  const retryable = message.retryable !== false
+  return (
+    <div data-testid="turn-error-card" data-error-code={code} className="flex justify-center fade-in my-2">
+      <div className="max-w-md w-full rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-[13px] text-amber-200">
+        <div className="flex items-center gap-2 font-medium">
+          <span>⚠</span>
+          <span>{TURN_ERROR_LABEL[code] || TURN_ERROR_LABEL.internal}</span>
+          <span className="ml-auto text-[10px] uppercase tracking-wide text-amber-200/50">{code}</span>
+        </div>
+        <div className="mt-1 text-amber-100/90">{message.content}</div>
+        {retryable && (
+          <div className="mt-2 flex justify-end">
+            <button
+              type="button"
+              data-testid="turn-error-retry"
+              disabled={disabled}
+              onClick={onRetry}
+              className="rounded-md border border-amber-400/40 bg-amber-400/10 px-3 py-1 text-[12px] font-medium text-amber-100 hover:bg-amber-400/20 disabled:opacity-50 transition-colors"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // 005.913: inline debug-event row. No avatar, no bubble — just one flat
 // monospace line. Hidden unless debug mode is on (handled by the caller
 // deciding whether to pass debug events).
@@ -3676,6 +3796,8 @@ function apiToUI(m: ApiMessage): UIMessage {
     attachments: m.attachments ?? undefined,
     reasoning: m.reasoning ?? undefined,
     reasoning_ms: m.reasoning_ms ?? undefined,
+    error_code: m.error_code ?? undefined,
+    retryable: m.retryable ?? undefined,
   }
 }
 
