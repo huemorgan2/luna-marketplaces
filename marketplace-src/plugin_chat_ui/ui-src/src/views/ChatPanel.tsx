@@ -308,6 +308,13 @@ const chatMarkdownComponents: Components = {
       </a>
     )
   },
+  // A table wider than the bubble scrolls inside its own wrapper — without it
+  // the table stretches the message column and the whole chat pans sideways.
+  table: ({ node: _node, children, ...props }) => (
+    <div className="table-scroll">
+      <table {...props}>{children}</table>
+    </div>
+  ),
 }
 
 interface UIMessage {
@@ -2094,7 +2101,7 @@ export function ChatPanel({
           New chat
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto overscroll-contain px-2 pb-3 space-y-0.5">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-2 pb-3 space-y-0.5">
         {loadingConvs && (
           <div data-testid="convs-skeleton" className="animate-pulse space-y-0.5 pt-1">
             {[0, 1, 2].map((i) => (
@@ -2145,7 +2152,7 @@ export function ChatPanel({
           }}
         />
 
-        <div ref={scrollRef} onScroll={handleScroll} className={cn('flex-1 overflow-y-auto overscroll-contain', dense ? 'px-3 py-3' : 'px-6 py-6')}>
+        <div ref={scrollRef} onScroll={handleScroll} className={cn('flex-1 overflow-y-auto overflow-x-hidden overscroll-contain', dense ? 'px-3 py-3' : 'px-6 py-6')}>
           {loadingMessages && (
             <div className="flex items-center justify-center py-12 text-ink-400 text-sm gap-2">
               <Loader2 className="w-4 h-4 animate-spin" />

@@ -133,6 +133,11 @@
 
 /* Chat markdown tables: hairline grid, padding, soft header highlight, rounded
    corners (overflow-hidden clips the cell borders to the rounded outer border). */
+.prose-luna .table-scroll {
+  margin: 0.75rem 0;
+  overflow-x: auto;
+}
+.prose-luna .table-scroll table { margin: 0; }
 .prose-luna table {
   width: 100%;
   margin: 0.75rem 0;
