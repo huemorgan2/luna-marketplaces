@@ -2755,6 +2755,39 @@ function StagedChip({ item, onRemove }: { item: StagedAttachment; onRemove: () =
   )
 }
 
+/** The composer's "working…" line. Short runs list tool names as text; once
+ *  the list would ellipsize it collapses to one wrench chip per distinct tool
+ *  (repeat calls get a ×N count) with the name on hover — many tools fit
+ *  without truncation. The spinner never shrinks (shrink-0): as a bare flex
+ *  child it was the first thing squeezed to micro size by long name lists. */
+function WorkingTools({ toolNames }: { toolNames: string[] }) {
+  const compact = toolNames.length > 3 || toolNames.join(', ').length > 34
+  const counts = new Map<string, number>()
+  for (const n of toolNames) counts.set(n, (counts.get(n) ?? 0) + 1)
+  return (
+    <>
+      <Loader2 className="w-3 h-3 shrink-0 animate-spin text-luna-300" />
+      <span className="text-luna-300 shrink-0">working…</span>
+      {compact ? (
+        <div className="flex items-center gap-1 min-w-0 overflow-hidden" data-testid="working-tool-chips">
+          {[...counts.entries()].map(([name, n]) => (
+            <span
+              key={name}
+              title={n > 1 ? `${name} ×${n}` : name}
+              className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded-md bg-white/[0.06] text-luna-300 shrink-0"
+            >
+              <Wrench className="w-3 h-3" />
+              {n > 1 && <span className="text-[10px] leading-none">{n}</span>}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <span className="text-luna-300 truncate">{toolNames.join(', ')}</span>
+      )}
+    </>
+  )
+}
+
 function Composer({
   value, onChange, onSubmit, streaming, condensing = false, stopStage, onStop,
   toolNames, offline, contextStatus, staged, onAttach, onRemoveStaged,
@@ -2868,10 +2901,7 @@ function Composer({
             {(toolNames.length > 0 || offline) && (
               <div className="flex-1 text-[11px] text-ink-500 flex items-center gap-2 min-w-0 pl-1">
                 {toolNames.length > 0 ? (
-                  <>
-                    <Loader2 className="w-3 h-3 animate-spin text-luna-300" />
-                    <span className="text-luna-300 truncate">working… {toolNames.join(', ')}</span>
-                  </>
+                  <WorkingTools toolNames={toolNames} />
                 ) : (
                   <span className="text-rose-400">offline — reconnecting…</span>
                 )}
