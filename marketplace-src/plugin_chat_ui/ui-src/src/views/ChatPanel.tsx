@@ -377,6 +377,27 @@ interface StagedAttachment {
 // 005.82-fixes2 item B: per-conversation composer draft persistence.
 const draftKey = (id: string | null) => `luna.draft.${id ?? 'new'}`
 
+// 012: the live-turn chrome for ONE conversation. Every conversation gets its
+// own record so a running turn's stream callbacks can never paint another
+// chat's composer or timeline (chat-switch isolation).
+interface TurnUI {
+  streaming: boolean
+  toolNames: string[]
+  subagent: { label: string; text: string; status: 'running' | 'done' | 'aborted' } | null
+  waitLine: { until: number; reason: string; resuming: boolean } | null
+  stopStage: 0 | 1 | 2
+  condensing: boolean
+}
+const EMPTY_TURN: TurnUI = {
+  streaming: false,
+  toolNames: [],
+  subagent: null,
+  waitLine: null,
+  stopStage: 0,
+  condensing: false,
+}
+const NO_MESSAGES: UIMessage[] = []
+
 export function ChatPanel({
   identity,
   onIdentityChange,
@@ -410,7 +431,37 @@ export function ChatPanel({
     setActiveIdRaw(id)
     onConversationChange?.(id)
   }, [onConversationChange])
-  const [messages, setMessages] = useState<UIMessage[]>([])
+  // 012: messages are keyed by conversation id so a turn that keeps streaming
+  // after the user switches chats writes into ITS OWN timeline, never the one
+  // on screen. Key '' = the pre-conversation (onboarding kickoff) state.
+  const [messagesByConv, setMessagesByConv] = useState<Record<string, UIMessage[]>>({})
+  const setConvMessages = useCallback(
+    (convId: string | null, updater: UIMessage[] | ((m: UIMessage[]) => UIMessage[])) => {
+      const key = convId ?? ''
+      setMessagesByConv((prev) => {
+        const cur = prev[key] ?? NO_MESSAGES
+        const next = typeof updater === 'function' ? updater(cur) : updater
+        return next === cur ? prev : { ...prev, [key]: next }
+      })
+    },
+    [],
+  )
+  // Delta/live buffers are keyed by message id (globally unique), so their
+  // flushes map over every loaded conversation — a chunk always lands on its
+  // own bubble no matter which chat is on screen.
+  const mapAllConvMessages = useCallback((mapper: (m: UIMessage[]) => UIMessage[]) => {
+    setMessagesByConv((prev) => {
+      let changed = false
+      const next: Record<string, UIMessage[]> = {}
+      for (const [k, v] of Object.entries(prev)) {
+        const nv = mapper(v)
+        next[k] = nv
+        if (nv !== v) changed = true
+      }
+      return changed ? next : prev
+    })
+  }, [])
+  const messages = messagesByConv[activeId ?? ''] ?? NO_MESSAGES
   const [input, setInput] = useState('')
   // 065: chat bridge — the Composer parks a focus() thunk here, and the
   // effect below routes shell-dispatched luna-chat actions into the composer.
@@ -439,53 +490,66 @@ export function ChatPanel({
   const stagedRef = useRef<StagedAttachment[]>([])
   stagedRef.current = staged
   const uploadPromisesRef = useRef<Map<string, Promise<AttachmentInfo | null>>>(new Map())
-  const [streaming, setStreaming] = useState(false)
-  const streamingRef = useRef(false)
-  useEffect(() => { streamingRef.current = streaming }, [streaming])
-  // 008.9: two-stage stop state.
-  const [stopStage, setStopStage] = useState<0 | 1 | 2>(0)
+  // 012: ALL live-turn chrome (streaming flag, tool wrenches, subagent line,
+  // wait countdown, stop stage, condense lock) is keyed by conversation id —
+  // switching chats must show THAT chat's turn state, not the last turn's.
+  const [turns, setTurns] = useState<Record<string, TurnUI>>({})
+  const patchTurn = useCallback(
+    (convId: string | null, patch: Partial<TurnUI> | ((t: TurnUI) => Partial<TurnUI>)) => {
+      const key = convId ?? ''
+      setTurns((prev) => {
+        const cur = prev[key] ?? EMPTY_TURN
+        const p = typeof patch === 'function' ? patch(cur) : patch
+        return { ...prev, [key]: { ...cur, ...p } }
+      })
+    },
+    [],
+  )
+  // Synchronous mirror of which conversations have a live stream owned or
+  // watched by this tab (state is async; guards need the truth NOW).
+  const streamingConvsRef = useRef<Set<string>>(new Set())
+  const setConvStreaming = useCallback((convId: string | null, on: boolean) => {
+    const key = convId ?? ''
+    if (on) streamingConvsRef.current.add(key)
+    else streamingConvsRef.current.delete(key)
+    patchTurn(key, { streaming: on })
+  }, [patchTurn])
+  // The active conversation's live-turn view — same names the render code and
+  // composer always used.
+  const turn = turns[activeId ?? ''] ?? EMPTY_TURN
+  const streaming = turn.streaming
+  const stopStage = turn.stopStage
+  const toolNames = turn.toolNames
+  const subagent = turn.subagent
+  const waitLine = turn.waitLine
+  const condensing = turn.condensing
   // The text that started the active turn — placed back in the composer on stop.
   const lastUserTextRef = useRef('')
-  // Synchronous in-flight flag: `streaming` is a render-closure value, so a
-  // second Enter while send() is still setting up (frozen tab flushing queued
-  // events, or the createConversation await) reads a stale `false` and would
-  // start a duplicate turn.
-  const sendBusyRef = useRef(false)
+  // Synchronous in-flight guard per conversation: `streaming` is a
+  // render-closure value, so a second Enter while send() is still setting up
+  // (frozen tab flushing queued events, or the createConversation await) reads
+  // a stale `false` and would start a duplicate turn.
+  const sendBusyConvsRef = useRef<Set<string>>(new Set())
   const [offline, setOffline] = useState(false)
   // Only show the list skeleton on a true cold start — if the cache seeded
   // the list above, there's nothing to wait for visually.
   const [loadingConvs, setLoadingConvs] = useState(() => cachedGet<ConversationSummary[]>('conversations') === null)
   const [loadingMessages, setLoadingMessages] = useState(false)
-  // Transient tool activity for the current turn, shown at the bottom only.
-  const [toolNames, setToolNames] = useState<string[]>([])
-  // 049/phase02: ONE inline subagent status line (Cursor-style shimmer).
-  // Latest `subagent.progress` replaces the text in place; `finished` settles
-  // it to a static summary that stays until the next turn starts.
-  const [subagent, setSubagent] = useState<
-    { label: string; text: string; status: 'running' | 'done' | 'aborted' } | null
-  >(null)
-  // 069: the agent called `wait` — one shimmer countdown line driven by
-  // ui.wait.* frames. `until` anchors a client-side tick; server ticks resync
-  // it (a reconnect shows the REMAINING time, not the original). `finished`
-  // flips it to "resuming…"; the next visible stream activity clears it.
-  const [waitLine, setWaitLine] = useState<
-    { until: number; reason: string; resuming: boolean } | null
-  >(null)
+  // Transient tool activity / subagent shimmer / wait countdown all live in
+  // the per-conversation `turns` record above (012).
+  // 069: wait countdown ticker — runs only while the ACTIVE chat has a live
+  // countdown (other chats' countdowns resync from ui.wait.tick frames).
   const [waitNow, setWaitNow] = useState(() => Date.now())
   useEffect(() => {
     if (!waitLine || waitLine.resuming) return
     const t = window.setInterval(() => setWaitNow(Date.now()), 500)
     return () => window.clearInterval(t)
   }, [waitLine])
-  const clearWaitLine = useCallback(() => {
-    setWaitLine((prev) => (prev ? null : prev))
-  }, [])
+  const clearWaitLine = useCallback((convId: string | null) => {
+    patchTurn(convId, (t) => (t.waitLine ? { waitLine: null } : {}))
+  }, [patchTurn])
   // 007.007: context-window fullness ring under the composer.
   const [contextStatus, setContextStatus] = useState<ContextStatus | null>(null)
-  // 073/phase002+003: a condense pass is running (user /condense or the
-  // server's pre-turn blocking pass) — the composer is blocked and the
-  // timeline shows the condensing shimmer until it finishes.
-  const [condensing, setCondensing] = useState(false)
   // 005.8-polish: inline approval cards. The dispatch gate suspends a risky
   // tool call and fires `approval.requested` on /api/events; we render a card
   // below the agent's prose and the chat stream resumes once it's decided.
@@ -571,8 +635,10 @@ export function ChatPanel({
       : '⏹ operation stopped'
 
   // 008.9: append a centered muted status line (stop / inject acknowledgements).
-  const addSystemLine = useCallback((text: string) => {
-    setMessages((m) => [
+  // 012: scoped — callers inside a stream pass the stream's conversation;
+  // composer-local callers pass the active one.
+  const addSystemLine = useCallback((convId: string | null, text: string) => {
+    setConvMessages(convId, (m) => [
       ...m,
       {
         id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -582,15 +648,15 @@ export function ChatPanel({
         created_at: new Date().toISOString(),
       },
     ])
-  }, [])
+  }, [setConvMessages])
 
   // 080: the turn failed with a typed notice. Any prose already streamed into
   // the pending bubble stays (finished, not pending); the failure itself is a
   // separate `turn_error` card — the same shape the server persists, so a
   // reload shows exactly what the live stream showed. Delta flushing is the
   // caller's job (it owns the flush refs).
-  const applyTurnError = useCallback((msgId: string, n: { code: string; message: string; retryable: boolean }) => {
-    setMessages((m) => {
+  const applyTurnError = useCallback((convId: string | null, msgId: string, n: { code: string; message: string; retryable: boolean }) => {
+    setConvMessages(convId, (m) => {
       const idx = m.findIndex((x) => x.id === msgId)
       const card: UIMessage = {
         id: `turn-error-${Date.now()}`,
@@ -613,7 +679,7 @@ export function ChatPanel({
       copy.splice(idx + 1, 0, card)
       return copy
     })
-  }, [])
+  }, [setConvMessages])
 
   // 080: Retry on an error card resends the user message that preceded it.
   // Plain function (not memoized): it must see the current `messages` and the
@@ -645,49 +711,52 @@ export function ChatPanel({
   // Agent task plan: intercept `ui.tasks` frames from the chat SSE stream
   // (each carries the FULL current plan); everything else flows up to Shell
   // (e.g. ui.navigate).
-  const handleUiEvent = useCallback((evt: { type: string; [key: string]: any }) => {
+  const handleUiEvent = useCallback((convId: string | null, evt: { type: string; [key: string]: any }) => {
     // 049/phase02: subagent lifecycle → the one shimmer line. Never a log.
+    // 012: scoped to the stream's conversation.
     if (evt.type === 'subagent.started') {
       const label = (evt.label as string) || 'agent'
-      setSubagent({ label, text: `${label} working…`, status: 'running' })
+      patchTurn(convId, { subagent: { label, text: `${label} working…`, status: 'running' } })
       return
     }
     if (evt.type === 'subagent.progress') {
       const label = (evt.label as string) || 'agent'
-      setSubagent({ label, text: String(evt.text || '…'), status: 'running' })
+      patchTurn(convId, { subagent: { label, text: String(evt.text || '…'), status: 'running' } })
       return
     }
     if (evt.type === 'subagent.finished') {
-      setSubagent((prev) => {
-        const label = (evt.label as string) || prev?.label || 'agent'
+      patchTurn(convId, (t) => {
+        const label = (evt.label as string) || t.subagent?.label || 'agent'
         if (evt.aborted) {
-          return { label, text: `${label} stopped (${evt.abort_reason || 'aborted'})`, status: 'aborted' }
+          return { subagent: { label, text: `${label} stopped (${evt.abort_reason || 'aborted'})`, status: 'aborted' } }
         }
         const secs = Math.max(1, Math.round(((evt.duration_ms as number) || 0) / 1000))
-        return { label, text: `${label} · done · ${secs}s`, status: 'done' }
+        return { subagent: { label, text: `${label} · done · ${secs}s`, status: 'done' } }
       })
       return
     }
     // 069: wait countdown — started/tick set the clock anchor, finished
     // flips to "resuming…" (cleared by the next delta / turn end).
     if (evt.type === 'ui.wait.started') {
-      setWaitLine({
-        until: Date.now() + Number(evt.seconds || 0) * 1000,
-        reason: String(evt.reason || ''),
-        resuming: false,
+      patchTurn(convId, {
+        waitLine: {
+          until: Date.now() + Number(evt.seconds || 0) * 1000,
+          reason: String(evt.reason || ''),
+          resuming: false,
+        },
       })
       return
     }
     if (evt.type === 'ui.wait.tick') {
-      setWaitLine((prev) =>
-        prev && !prev.resuming
-          ? { ...prev, until: Date.now() + Number(evt.remaining || 0) * 1000 }
-          : prev,
+      patchTurn(convId, (t) =>
+        t.waitLine && !t.waitLine.resuming
+          ? { waitLine: { ...t.waitLine, until: Date.now() + Number(evt.remaining || 0) * 1000 } }
+          : {},
       )
       return
     }
     if (evt.type === 'ui.wait.finished') {
-      setWaitLine((prev) => (prev ? { ...prev, resuming: true } : prev))
+      patchTurn(convId, (t) => (t.waitLine ? { waitLine: { ...t.waitLine, resuming: true } } : {}))
       return
     }
     if (evt.type === 'ui.tasks') {
@@ -703,18 +772,15 @@ export function ChatPanel({
       return
     }
     onUiEvent?.(evt)
-  }, [onUiEvent, clearPlanResuming])
+  }, [onUiEvent, clearPlanResuming, patchTurn])
 
   // 038/phase04: a running turn in this tab is visible work — stop showing
   // "Resuming…" the moment it starts.
   useEffect(() => {
     if (streaming) clearPlanResuming()
   }, [streaming, clearPlanResuming])
-
-  // 069: a turn ending (done, stop, error) always retires the wait line.
-  useEffect(() => {
-    if (!streaming) clearWaitLine()
-  }, [streaming, clearWaitLine])
+  // 069: the wait line is retired per-conversation in each stream's terminal
+  // handler (012) — no global effect needed.
 
   // Agent task plan: backfill ONCE on mount, so a reload (or returning to the
   // chat) shows the plan without waiting for the next `ui.tasks` frame.
@@ -798,15 +864,17 @@ export function ChatPanel({
     const buf = deltaBufRef.current
     if (buf.size === 0) return
     deltaBufRef.current = new Map()
-    setMessages((m) =>
-      m.map((msg) => {
-        const add = buf.get(msg.id)
-        return add ? { ...msg, content: msg.content + add } : msg
-      }),
+    mapAllConvMessages((m) =>
+      m.some((msg) => buf.has(msg.id))
+        ? m.map((msg) => {
+            const add = buf.get(msg.id)
+            return add ? { ...msg, content: msg.content + add } : msg
+          })
+        : m,
     )
-  }, [])
-  const queueDelta = useCallback((id: string, delta: string) => {
-    clearWaitLine() // 069: visible stream activity ends the wait line
+  }, [mapAllConvMessages])
+  const queueDelta = useCallback((convId: string | null, id: string, delta: string) => {
+    clearWaitLine(convId) // 069: visible stream activity ends the wait line
     deltaBufRef.current.set(id, (deltaBufRef.current.get(id) ?? '') + delta)
     if (deltaRafRef.current === null) {
       deltaRafRef.current = requestAnimationFrame(() => {
@@ -830,15 +898,17 @@ export function ChatPanel({
     const buf = reasoningBufRef.current
     if (buf.size === 0) return
     reasoningBufRef.current = new Map()
-    setMessages((m) =>
-      m.map((msg) => {
-        const add = buf.get(msg.id)
-        return add
-          ? { ...msg, reasoning: (msg.reasoning ?? '') + add.text, reasoning_ms: add.ms }
-          : msg
-      }),
+    mapAllConvMessages((m) =>
+      m.some((msg) => buf.has(msg.id))
+        ? m.map((msg) => {
+            const add = buf.get(msg.id)
+            return add
+              ? { ...msg, reasoning: (msg.reasoning ?? '') + add.text, reasoning_ms: add.ms }
+              : msg
+          })
+        : m,
     )
-  }, [])
+  }, [mapAllConvMessages])
   const queueReasoning = useCallback((id: string, text: string, ms?: number) => {
     const prev = reasoningBufRef.current.get(id)
     reasoningBufRef.current.set(id, {
@@ -867,16 +937,18 @@ export function ChatPanel({
     if (buf.size === 0) return
     liveBufRef.current = new Map()
     const now = Date.now()
-    setMessages((m) =>
-      m.map((msg) => {
-        const evts = buf.get(msg.id)
-        if (!evts) return msg
-        let runs = msg.live_runs
-        for (const e of evts) runs = applyLiveEvent(runs, e, now)
-        return runs === msg.live_runs ? msg : { ...msg, live_runs: runs }
-      }),
+    mapAllConvMessages((m) =>
+      m.some((msg) => buf.has(msg.id))
+        ? m.map((msg) => {
+            const evts = buf.get(msg.id)
+            if (!evts) return msg
+            let runs = msg.live_runs
+            for (const e of evts) runs = applyLiveEvent(runs, e, now)
+            return runs === msg.live_runs ? msg : { ...msg, live_runs: runs }
+          })
+        : m,
     )
-  }, [])
+  }, [mapAllConvMessages])
   const queueLive = useCallback((id: string, evt: LiveEvent) => {
     const list = liveBufRef.current.get(id) ?? []
     list.push(evt)
@@ -893,19 +965,19 @@ export function ChatPanel({
     }
   }, [flushLiveNow])
   /** Route a ui_event frame: live-run frames go to the pending bubble, the
-   *  rest to the shell-level handler. */
-  const routeUiEvent = useCallback((msgId: string, evt: { type: string; [key: string]: any }) => {
+   *  rest to the shell-level handler (scoped to the stream's conversation). */
+  const routeUiEvent = useCallback((convId: string | null, msgId: string, evt: { type: string; [key: string]: any }) => {
     if (isLiveEvent(evt)) queueLive(msgId, evt as LiveEvent)
-    else handleUiEvent(evt)
+    else handleUiEvent(convId, evt)
   }, [queueLive, handleUiEvent])
 
   // 006.7: trigger a headless agent turn so the model can respond to a
   // rejection that landed after the original SSE stream closed.
   function triggerContinuation(convId: string) {
-    if (streamingRef.current) return
-    setStreaming(true)
+    if (streamingConvsRef.current.has(convId)) return
+    setConvStreaming(convId, true)
     const asstId = `local-cont-${Date.now()}`
-    setMessages((m) => [
+    setConvMessages(convId, (m) => [
       ...m,
       { id: asstId, role: 'assistant', content: '', pending: true, created_at: new Date().toISOString() },
     ])
@@ -917,18 +989,18 @@ export function ChatPanel({
     // streamingRef guard silently swallowed the follow-up (dojo M3 defect).
     let needsChain = false
     continueConversation(convId, {
-      onDelta: (delta) => queueDelta(currentMsgId, delta),
+      onDelta: (delta) => queueDelta(convId, currentMsgId, delta),
       onReasoning: (r) => queueReasoning(currentMsgId, r.text, r.ms),
       onNewMessage: (id) => {
         currentMsgId = id
-        setMessages((m) => [
+        setConvMessages(convId, (m) => [
           ...m,
           { id, role: 'assistant', content: '', pending: true, created_at: new Date().toISOString() },
         ])
       },
-      onUiEvent: (evt) => routeUiEvent(currentMsgId, evt),
+      onUiEvent: (evt) => routeUiEvent(convId, currentMsgId, evt),
       onNotice: (n) => {
-        setMessages((m) => [
+        setConvMessages(convId, (m) => [
           ...m,
           {
             id: `notice-${Date.now()}`,
@@ -942,7 +1014,7 @@ export function ChatPanel({
       // 039: billing gateway refused the turn — action-required banner (the
       // server also persists a marker row, so reloads keep the explanation).
       onPolicyBlocked: (b) => {
-        setMessages((m) => [
+        setConvMessages(convId, (m) => [
           ...m,
           {
             id: `policy-block-${Date.now()}`,
@@ -958,7 +1030,7 @@ export function ChatPanel({
         flushDeltasNow()
         flushReasoningNow()
         flushLiveNow()
-        applyTurnError(currentMsgId, n)
+        applyTurnError(convId, currentMsgId, n)
       },
       onDone: (_text, meta) => {
         flushDeltasNow()
@@ -966,7 +1038,7 @@ export function ChatPanel({
         flushLiveNow()
         // 036/phase02: a superseded draft is persisted server-side as
         // superseded_partial — keep it (dimmed/collapsed), never a silent void.
-        setMessages((m) =>
+        setConvMessages(convId, (m) =>
           meta?.superseded
             ? m.flatMap((msg) =>
                 msg.id !== currentMsgId
@@ -976,8 +1048,8 @@ export function ChatPanel({
                     : [])
             : m.map((msg) => (msg.id === currentMsgId ? { ...msg, pending: false } : msg)),
         )
-        if (meta?.stopped) addSystemLine(stopMarkerText(meta.stopped))
-        if (meta?.context) setContextStatus(meta.context)
+        if (meta?.stopped) addSystemLine(convId, stopMarkerText(meta.stopped))
+        if (meta?.context && activeIdRef.current === convId) setContextStatus(meta.context)
         // 031: messages sent DURING a follow-up turn queue again — chain another
         // continuation so every mid-turn message is ingested, WhatsApp-style.
         if (meta?.needs_continuation) needsChain = true
@@ -989,12 +1061,12 @@ export function ChatPanel({
         flushDeltasNow()
         flushReasoningNow()
         flushLiveNow()
-        setStreaming(false)
-        streamingRef.current = false
-        if (needsChain && activeIdRef.current === convId) {
-          setTimeout(() => {
-            if (activeIdRef.current === convId) triggerContinuation(convId)
-          }, 400)
+        setConvStreaming(convId, false)
+        patchTurn(convId, { waitLine: null })
+        // 012: the drain belongs to ITS conversation — chain even if the user
+        // switched away (isolated state makes the background turn safe).
+        if (needsChain) {
+          setTimeout(() => triggerContinuation(convId), 400)
         }
       })
   }
@@ -1007,16 +1079,16 @@ export function ChatPanel({
   const attachCtrlRef = useRef<AbortController | null>(null)
   useEffect(() => () => { attachCtrlRef.current?.abort() }, [])
   async function reattachIfActive(convId: string) {
-    if (streamingRef.current) return
+    if (streamingConvsRef.current.has(convId)) return
     let status: { active: boolean }
     try { status = await getTurnStatus(convId) } catch { return }
     if (!status.active || activeIdRef.current !== convId) return
     attachCtrlRef.current?.abort()
     const ctrl = new AbortController()
     attachCtrlRef.current = ctrl
-    setStreaming(true)
+    setConvStreaming(convId, true)
     const asstId = `local-att-${Date.now()}`
-    setMessages((m) => [
+    setConvMessages(convId, (m) => [
       ...m,
       { id: asstId, role: 'assistant', content: '', pending: true, created_at: new Date().toISOString() },
     ])
@@ -1024,26 +1096,26 @@ export function ChatPanel({
     let needsCont = false
     const resync = () => {
       api.messages(convId)
-        .then((msgs) => { if (activeIdRef.current === convId) setMessages(msgs.map(apiToUI)) })
+        .then((msgs) => setConvMessages(convId, msgs.map(apiToUI)))
         .catch(() => {})
     }
     try {
       await attachTurnStream(convId, {
-        onDelta: (delta) => queueDelta(currentMsgId, delta),
+        onDelta: (delta) => queueDelta(convId, currentMsgId, delta),
         onReasoning: (r) => queueReasoning(currentMsgId, r.text, r.ms),
-        onToolCall: (names) => setToolNames((n) => [...n, ...names]),
+        onToolCall: (names) => patchTurn(convId, (t) => ({ toolNames: [...t.toolNames, ...names] })),
         onNewMessage: (id) => {
           currentMsgId = id
-          setMessages((m) => [
+          setConvMessages(convId, (m) => [
             ...m,
             { id, role: 'assistant', content: '', pending: true, created_at: new Date().toISOString() },
           ])
         },
-        onUiEvent: (evt) => routeUiEvent(currentMsgId, evt),
-        onCondenseStarted: () => setCondensing(true),
+        onUiEvent: (evt) => routeUiEvent(convId, currentMsgId, evt),
+        onCondenseStarted: () => patchTurn(convId, { condensing: true }),
         onCondenseDone: (r) => {
-          setCondensing(false)
-          if (r.context) setContextStatus(r.context)
+          patchTurn(convId, { condensing: false })
+          if (r.context && activeIdRef.current === convId) setContextStatus(r.context)
         },
         onDone: (_text, meta) => {
           flushDeltasNow()
@@ -1052,12 +1124,12 @@ export function ChatPanel({
           // 036/phase02: the superseded draft IS in the DB (superseded_partial)
           // — drop only the local pending bubble; resync renders the truth,
           // including the ⏹ turn_stopped marker row.
-          setMessages((m) =>
+          setConvMessages(convId, (m) =>
             meta?.superseded
               ? m.filter((msg) => !msg.pending)
               : m.map((msg) => (msg.pending ? { ...msg, pending: false } : msg)),
           )
-          if (meta?.context) setContextStatus(meta.context)
+          if (meta?.context && activeIdRef.current === convId) setContextStatus(meta.context)
           // 036/phase05: a watched turn that breaks still owes its follow-up —
           // this tab may be the only client left to fire it.
           if (meta?.needs_continuation) needsCont = true
@@ -1067,7 +1139,7 @@ export function ChatPanel({
           flushDeltasNow()
           flushReasoningNow()
           flushLiveNow()
-          setMessages((m) => m.map((msg) => (msg.pending ? { ...msg, pending: false } : msg)))
+          setConvMessages(convId, (m) => m.map((msg) => (msg.pending ? { ...msg, pending: false } : msg)))
           resync()
         },
         onError: () => {},
@@ -1081,14 +1153,11 @@ export function ChatPanel({
       flushReasoningNow()
       if (attachCtrlRef.current === ctrl) {
         attachCtrlRef.current = null
-        setStreaming(false)
-        streamingRef.current = false
-        setToolNames([])
-        if (needsCont && activeIdRef.current === convId) {
-          setTimeout(() => {
-            if (activeIdRef.current === convId) triggerContinuation(convId)
-          }, 400)
-        }
+      }
+      setConvStreaming(convId, false)
+      patchTurn(convId, { toolNames: [], waitLine: null, condensing: false })
+      if (needsCont) {
+        setTimeout(() => triggerContinuation(convId), 400)
       }
     }
   }
@@ -1131,7 +1200,7 @@ export function ChatPanel({
           // continuing those would stream a foreign agent turn into this view.
           if (info.decision === 'rejected') {
             const convId = (info as { conversation_id?: string }).conversation_id ?? activeIdRef.current
-            if (convId && convId === activeIdRef.current && !streamingRef.current) {
+            if (convId && convId === activeIdRef.current && !streamingConvsRef.current.has(convId)) {
               setTimeout(() => {
                 if (activeIdRef.current === convId) triggerContinuation(convId)
               }, 300)
@@ -1200,12 +1269,16 @@ export function ChatPanel({
             setPlanCreatedAt(null)
             setPlanConversationId(null)
           }
-          if (info.conversation_id !== activeIdRef.current) return
+          // 012: route to the message's OWN conversation — never the one on
+          // screen. Events without a conversation id are dropped (they used to
+          // land in whatever chat was open).
+          const msgConvId = info.conversation_id
+          if (!msgConvId) return
           // 008.994: a muted line arrives as role="user" + kind="muted"; the
           // agent's reply arrives as role="assistant". Honor the role/kind from
           // the event instead of assuming assistant.
           const role = (info.role === 'user' ? 'user' : 'assistant') as UIMessage['role']
-          setMessages((m0) => {
+          setConvMessages(msgConvId, (m0) => {
             // 076: an assistant reply landing means the server drained the
             // queue — every earlier "Sending…" user bubble has been handled.
             const m =
@@ -1250,7 +1323,7 @@ export function ChatPanel({
           // The requesting turn already ended (request_credential returns
           // immediately) — continue so the agent acknowledges the outcome.
           const convId = info.conversation_id ?? activeIdRef.current
-          if (convId && convId === activeIdRef.current && !streamingRef.current) {
+          if (convId && convId === activeIdRef.current && !streamingConvsRef.current.has(convId)) {
             setTimeout(() => {
               if (activeIdRef.current === convId) triggerContinuation(convId)
             }, 300)
@@ -1259,18 +1332,20 @@ export function ChatPanel({
         // 008.9: a stop was issued for this conversation (button, /stop, or any
         // other surface). Put the originating message back in the composer; for
         // a hard stop, clear streaming immediately (the stream is being killed).
+        // 012: scoped to the stopped conversation.
         onChatStopped: (info) => {
-          if (info.conversation_id !== activeIdRef.current) return
-          if (lastUserTextRef.current) {
+          const convId = info.conversation_id
+          if (!convId) return
+          if (convId === activeIdRef.current && lastUserTextRef.current) {
             setInput((cur) => cur || lastUserTextRef.current)
           }
           if (info.stage === 'hard') {
-            setStreaming(false)
-            setStopStage(0)
+            setConvStreaming(convId, false)
+            patchTurn(convId, { stopStage: 0, waitLine: null })
             // 0.21.002: hard stop kills the stream, so onDone may never fire to
             // clear `pending`. Stop the "thinking" dots on any still-pending
             // assistant bubble that has no content yet.
-            setMessages((m) =>
+            setConvMessages(convId, (m) =>
               m.map((msg) =>
                 msg.role === 'assistant' && msg.pending && !msg.content
                   ? { ...msg, pending: false }
@@ -1365,28 +1440,32 @@ export function ChatPanel({
 
   // First run: let Luna open the conversation herself.
   const kickoff = useCallback(async () => {
-    setStreaming(true)
-    setToolNames([])
-    setSubagent(null)
+    // 012: onboarding streams before any conversation exists — it lives under
+    // the '' key until the server-created conversation is selected below.
+    setConvStreaming(null, true)
+    patchTurn(null, { toolNames: [], subagent: null })
     const assistantMsg: UIMessage = { id: `local-a-${Date.now()}`, role: 'assistant', content: '', pending: true }
-    setMessages([assistantMsg])
+    setConvMessages(null, [assistantMsg])
     try {
       await startOnboardingStream({
-        onDelta: (delta) => queueDelta(assistantMsg.id, delta),
-        onToolCall: (names) => setToolNames((n) => [...n, ...names]),
+        onDelta: (delta) => queueDelta(null, assistantMsg.id, delta),
+        onToolCall: (names) => patchTurn(null, (t) => ({ toolNames: [...t.toolNames, ...names] })),
         onDone: () => {
           flushDeltasNow()
-          setMessages((m) => m.map((x) => (x.id === assistantMsg.id ? { ...x, pending: false } : x)))
+          setConvMessages(null, (m) => m.map((x) => (x.id === assistantMsg.id ? { ...x, pending: false } : x)))
         },
       })
     } finally {
       flushDeltasNow()
-      setStreaming(false)
-      setToolNames([])
+      setConvStreaming(null, false)
+      patchTurn(null, { toolNames: [] })
       const c = await refreshConversations()
-      if (c.length > 0) setActiveId(c[0].id)
+      // The onboarding turn persisted its rows server-side — select the
+      // conversation properly so its timeline loads under its own key.
+      if (c.length > 0) void selectConversation(c[0].id)
       syncOnboarding()
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshConversations, syncOnboarding])
 
   useEffect(() => {
@@ -1468,7 +1547,8 @@ export function ChatPanel({
     // 008.95: staged uploads are bound to the conversation that minted their
     // refs — they don't survive a switch.
     clearStaged()
-    setStopStage(0)
+    // 012: NO turn-state reset here — every conversation carries its own
+    // turn record, so switching shows the target chat's real state.
     let msgs
     try {
       msgs = await api.messages(id)
@@ -1477,14 +1557,14 @@ export function ChatPanel({
       return false
     }
     // 045/phase05: apply-and-clear any buffered deltas before the overwrite so
-    // a stale chunk from the previous conversation can't misroute later.
+    // a stale chunk can't misroute later.
     flushDeltasNow()
     // 045/phase05 (dojo catch): a message sent while this fetch was in flight
     // must survive the overwrite — the snapshot predates it, so blindly
     // replacing state here wiped the user's just-sent bubble (and the live
     // assistant bubble streaming into it). Keep trailing local-* messages;
-    // their persisted rows are newer than this snapshot and reconcile later.
-    setMessages((prev) => {
+    // 012: the merge now only ever sees THIS conversation's in-flight bubbles.
+    setConvMessages(id, (prev) => {
       const locals = prev.filter((x) => x.id.startsWith('local-'))
       const loaded = msgs.map(apiToUI)
       return locals.length ? [...loaded, ...locals] : loaded
@@ -1580,7 +1660,7 @@ export function ChatPanel({
       const d = localStorage.getItem(draftKey(c.id))
       if (d) setInput(d)
     } catch { /* localStorage unavailable */ }
-    setMessages([])
+    setConvMessages(c.id, [])
   }
 
   // 008.9: stop the active turn. First click → soft (finish current step);
@@ -1591,11 +1671,11 @@ export function ChatPanel({
     const hard = stopStage >= 1
     void stopTurn(convId, hard).catch(() => {})
     if (hard) {
-      setStopStage(2)
-      addSystemLine('Hard-stopping the agent.')
+      patchTurn(convId, { stopStage: 2 })
+      addSystemLine(convId, 'Hard-stopping the agent.')
     } else {
-      setStopStage(1)
-      addSystemLine('Stopping agent at the end of this step…')
+      patchTurn(convId, { stopStage: 1 })
+      addSystemLine(convId, 'Stopping agent at the end of this step…')
     }
   }
 
@@ -1697,24 +1777,24 @@ export function ChatPanel({
       if (!fromBridge) setInput('')
       const condConvId = activeIdRef.current
       if (!condConvId) {
-        addSystemLine('Nothing to condense — no conversation yet.')
+        addSystemLine(null, 'Nothing to condense — no conversation yet.')
         return
       }
       if (streaming || condensing) {
-        addSystemLine('Busy — wait for the current turn to finish, then retry /condense.')
+        addSystemLine(condConvId, 'Busy — wait for the current turn to finish, then retry /condense.')
         return
       }
-      setCondensing(true)
+      patchTurn(condConvId, { condensing: true })
       try {
         const r = await api.condense(condConvId)
-        if (r.context) setContextStatus(r.context)
-        addSystemLine(r.condensed
+        if (r.context && activeIdRef.current === condConvId) setContextStatus(r.context)
+        addSystemLine(condConvId, r.condensed
           ? 'Conversation condensed — older messages folded into a summary.'
           : 'Nothing to condense yet.')
       } catch (e) {
-        addSystemLine(`Condense failed: ${(e as Error).message}`)
+        addSystemLine(condConvId, `Condense failed: ${(e as Error).message}`)
       } finally {
-        setCondensing(false)
+        patchTurn(condConvId, { condensing: false })
       }
       return
     }
@@ -1730,8 +1810,8 @@ export function ChatPanel({
         if (!fromBridge) setInput('')
         const wantHard = text === '/stop!' || stopStage >= 1
         void stopTurn(convId, wantHard).catch(() => {})
-        addSystemLine(wantHard ? 'Hard-stopping the agent.' : 'Stopping agent at the end of this step…')
-        setStopStage(wantHard ? 2 : 1)
+        addSystemLine(convId, wantHard ? 'Hard-stopping the agent.' : 'Stopping agent at the end of this step…')
+        patchTurn(convId, { stopStage: wantHard ? 2 : 1 })
         return
       }
       if (!fromBridge) {
@@ -1757,7 +1837,7 @@ export function ChatPanel({
         queued: true,
         attachments: qDisplay.length ? qDisplay : undefined,
       }
-      setMessages((m) => [...m, qMsg])
+      setConvMessages(convId, (m) => [...m, qMsg])
       isAtBottomRef.current = true
       setShowNewMessages(false)
       requestAnimationFrame(() => {
@@ -1765,25 +1845,26 @@ export function ChatPanel({
       })
       queueMessage(convId, text, false, qAtts)
         .then((ack) =>
-          setMessages((m) =>
+          setConvMessages(convId, (m) =>
             m.map((x) => (x.id === qId ? { ...x, id: ack.id || x.id, queued: false } : x)),
           ),
         )
         .catch(() => {
           // Keep the bubble; it's persisted server-side and reconciles on reload.
-          setMessages((m) => m.map((x) => (x.id === qId ? { ...x, queued: false } : x)))
+          setConvMessages(convId, (m) => m.map((x) => (x.id === qId ? { ...x, queued: false } : x)))
         })
       return
     }
 
     // Duplicate-send guard: a turn is already being set up but `streaming`
     // hasn't rendered yet. The re-send is almost certainly the same message
-    // (the composer only clears after setup), so drop it.
-    if (sendBusyRef.current) return
-    sendBusyRef.current = true
+    // (the composer only clears after setup), so drop it. 012: per chat.
+    const busyKey = activeId ?? ''
+    if (sendBusyConvsRef.current.has(busyKey)) return
+    sendBusyConvsRef.current.add(busyKey)
 
     lastUserTextRef.current = text
-    setStopStage(0)
+    patchTurn(activeId, { stopStage: 0 })
     const draftId = activeId
     let convId = activeId
     if (!convId) {
@@ -1793,7 +1874,7 @@ export function ChatPanel({
         convId = c.id
         setActiveId(c.id)
       } catch (e) {
-        sendBusyRef.current = false
+        sendBusyConvsRef.current.delete(busyKey)
         throw e
       }
     }
@@ -1814,14 +1895,13 @@ export function ChatPanel({
       clearStaged()
       if (!text && !sendAtts.length) {
         // Every upload failed and there's no text — nothing to send.
-        sendBusyRef.current = false
+        sendBusyConvsRef.current.delete(busyKey)
         return
       }
     }
 
-    setStreaming(true)
-    setToolNames([])
-    setSubagent(null)
+    setConvStreaming(convId, true)
+    patchTurn(convId, { toolNames: [], subagent: null })
     let needsContinuation = false
     const now = new Date().toISOString()
     const userMsg: UIMessage = {
@@ -1838,7 +1918,7 @@ export function ChatPanel({
       pending: true,
       created_at: new Date(Date.now() + 1).toISOString(),
     }
-    setMessages((m) => [...m, userMsg, assistantMsg])
+    setConvMessages(convId, (m) => [...m, userMsg, assistantMsg])
     // User just sent — scroll to bottom and resume auto-scroll
     isAtBottomRef.current = true
     setShowNewMessages(false)
@@ -1849,13 +1929,13 @@ export function ChatPanel({
     try {
       let currentMsgId = assistantMsg.id
       await sendMessageStream(convId, text, {
-        onDelta: (delta) => queueDelta(currentMsgId, delta),
+        onDelta: (delta) => queueDelta(convId, currentMsgId, delta),
         onReasoning: (r) => queueReasoning(currentMsgId, r.text, r.ms),
-        onToolCall: (names) => setToolNames((n) => [...n, ...names]),
+        onToolCall: (names) => patchTurn(convId, (t) => ({ toolNames: [...t.toolNames, ...names] })),
         onToolResult: (_name, _result, embed) => {
           if (embed?.embed_iframe || embed?.embed_html) {
             const targetId = currentMsgId
-            setMessages((m) => {
+            setConvMessages(convId, (m) => {
               const copy = [...m]
               const idx = copy.findIndex((x) => x.id === targetId)
               if (idx >= 0) {
@@ -1869,16 +1949,16 @@ export function ChatPanel({
             })
           }
         },
-        onUiEvent: (evt) => routeUiEvent(currentMsgId, evt),
+        onUiEvent: (evt) => routeUiEvent(convId, currentMsgId, evt),
         // 073/phase003: server-side pre-turn condense — block the composer
         // behind the condensing shimmer until the pass finishes.
-        onCondenseStarted: () => setCondensing(true),
+        onCondenseStarted: () => patchTurn(convId, { condensing: true }),
         onCondenseDone: (r) => {
-          setCondensing(false)
-          if (r.context) setContextStatus(r.context)
+          patchTurn(convId, { condensing: false })
+          if (r.context && activeIdRef.current === convId) setContextStatus(r.context)
         },
         onNotice: (n) => {
-          setMessages((m) => [
+          setConvMessages(convId, (m) => [
             ...m,
             {
               id: `notice-${Date.now()}`,
@@ -1891,7 +1971,7 @@ export function ChatPanel({
         },
         // 039: billing gateway refused the turn — action-required banner.
         onPolicyBlocked: (b) => {
-          setMessages((m) => [
+          setConvMessages(convId, (m) => [
             ...m,
             {
               id: `policy-block-${Date.now()}`,
@@ -1911,7 +1991,7 @@ export function ChatPanel({
             created_at: new Date().toISOString(),
           }
           currentMsgId = id
-          setMessages((m) => [...m, newMsg])
+          setConvMessages(convId, (m) => [...m, newMsg])
         },
         // 080: the turn failed with a typed notice — render the error card
         // (with Retry when retryable) instead of raw prose or "Stream failed".
@@ -1919,7 +1999,7 @@ export function ChatPanel({
           flushDeltasNow()
           flushReasoningNow()
           flushLiveNow()
-          applyTurnError(currentMsgId, n)
+          applyTurnError(convId, currentMsgId, n)
         },
         onDone: (_text, meta) => {
           flushDeltasNow()
@@ -1928,7 +2008,7 @@ export function ChatPanel({
           // 036/phase02: a superseded draft stays visible as a dimmed,
           // collapsed "interrupted" bubble (persisted server-side as
           // superseded_partial); the follow-up turn still owns THE reply.
-          setMessages((m) =>
+          setConvMessages(convId, (m) =>
             meta?.superseded
               ? m.flatMap((msg) =>
                   msg.id !== currentMsgId
@@ -1938,12 +2018,14 @@ export function ChatPanel({
                       : [])
               : m.map((msg) => (msg.id === currentMsgId ? { ...msg, pending: false } : msg)),
           )
-          if (meta?.stopped) addSystemLine(stopMarkerText(meta.stopped))
-          if (meta?.context) setContextStatus(meta.context)
+          if (meta?.stopped) addSystemLine(convId, stopMarkerText(meta.stopped))
+          if (meta?.context && activeIdRef.current === convId) setContextStatus(meta.context)
           // 008.9: a USER-stopped turn returns its originating message to the
           // composer. 034/phase04: 'injected' stops are internal hand-offs to a
-          // follow-up turn — never refill the composer for those.
-          if (meta?.stopped && meta.stopped !== 'injected' && lastUserTextRef.current) {
+          // follow-up turn — never refill the composer for those. 012: only if
+          // this chat is still the one on screen.
+          if (meta?.stopped && meta.stopped !== 'injected' && lastUserTextRef.current
+              && activeIdRef.current === convId) {
             setInput((cur) => cur || lastUserTextRef.current)
           }
           // 007.004.1 / 008.9 / 031: auto-continue when a skill unlocked tools OR
@@ -1958,7 +2040,7 @@ export function ChatPanel({
           flushDeltasNow()
           flushReasoningNow()
           flushLiveNow()
-          setMessages((m) =>
+          setConvMessages(convId, (m) =>
             m.map((msg) =>
               msg.id === currentMsgId
                 ? { ...msg, pending: false, content: msg.content || `Error: ${err.message}` }
@@ -1972,7 +2054,7 @@ export function ChatPanel({
         // assistant bubble; KEEP the user message as a normal (queued) bubble.
         // The running turn breaks and a follow-up ingests it.
         onQueued: (ack) => {
-          setMessages((m) =>
+          setConvMessages(convId, (m) =>
             m
               .filter((x) => x.id !== assistantMsg.id)
               .map((x) => (x.id === userMsg.id ? { ...x, id: ack?.id || x.id, queued: true } : x)),
@@ -1986,12 +2068,11 @@ export function ChatPanel({
           flushDeltasNow()
           flushReasoningNow()
           flushLiveNow()
-          const convId = activeIdRef.current
-          setMessages((m) => m.map((msg) => (msg.pending ? { ...msg, pending: false } : msg)))
+          setConvMessages(convId, (m) => m.map((msg) => (msg.pending ? { ...msg, pending: false } : msg)))
           if (convId) {
             api.messages(convId)
               .then((msgs) => {
-                if (activeIdRef.current === convId) setMessages(msgs.map(apiToUI))
+                setConvMessages(convId, msgs.map(apiToUI))
               })
               .catch(() => {})
           }
@@ -2000,18 +2081,16 @@ export function ChatPanel({
     } finally {
       flushDeltasNow()
       flushReasoningNow()
-      sendBusyRef.current = false
-      setStreaming(false)
-      streamingRef.current = false
-      setStopStage(0)
-      setToolNames([])
+      sendBusyConvsRef.current.delete(busyKey)
+      setConvStreaming(convId, false)
       // 073: a stream that died mid-condense must not leave the composer locked.
-      setCondensing(false)
-      if (needsContinuation && convId && activeIdRef.current === convId) {
+      patchTurn(convId, { stopStage: 0, toolNames: [], condensing: false, waitLine: null })
+      // 012: continuation belongs to the conversation, not the viewport —
+      // fire it even if the user switched away (queued drains finish in the
+      // background chat instead of dying on switch).
+      if (needsContinuation && convId) {
         const contId = convId
-        setTimeout(() => {
-          if (activeIdRef.current === contId) triggerContinuation(contId)
-        }, 400)
+        setTimeout(() => triggerContinuation(contId), 400)
       }
       refreshConversations()
       // Slash commands like /identity and /personality mutate the agent's
@@ -2047,7 +2126,7 @@ export function ChatPanel({
       }
     }).catch((e) => {
       clearPlanResuming()
-      addSystemLine(`⚠ Resume failed: ${e instanceof Error ? e.message : 'request error'}`)
+      addSystemLine(activeIdRef.current, `⚠ Resume failed: ${e instanceof Error ? e.message : 'request error'}`)
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [planResuming, activeId, clearPlanResuming, addSystemLine])
@@ -2062,7 +2141,7 @@ export function ChatPanel({
     void api.dismissPlan().catch(() => {
       setPlanTasks(prevTasks)
       setPlanCreatedAt(prevCreated)
-      addSystemLine('⚠ Dismiss failed — the plan is still open')
+      addSystemLine(activeIdRef.current, '⚠ Dismiss failed — the plan is still open')
     })
   }, [planTasks, planCreatedAt, addSystemLine])
 
