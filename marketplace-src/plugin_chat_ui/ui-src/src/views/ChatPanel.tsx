@@ -3307,6 +3307,28 @@ function EmptyState({ name, emoji, avatarUrl, ownerName }: { name: string; emoji
 }
 
 // 005.917: chat header with conversation actions menu (copy/rename/delete).
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    // Fallback: clipboard API requires document focus; execCommand doesn't.
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      const ok = document.execCommand('copy')
+      document.body.removeChild(ta)
+      return ok
+    } catch {
+      return false
+    }
+  }
+}
+
 function ChatHeader({
   identity,
   activeId,
@@ -3335,6 +3357,7 @@ function ChatHeader({
   const [renaming, setRenaming] = useState(false)
   const [draft, setDraft] = useState(activeTitle || '')
   const [copied, setCopied] = useState(false)
+  const [ctxState, setCtxState] = useState<'idle' | 'busy' | 'copied'>('idle')
   const inputRef = useRef<HTMLInputElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
@@ -3383,26 +3406,7 @@ function ChatHeader({
             .filter((a) => a.req.conversation_id === activeId)
             .map((a) => a.req),
         )
-    let ok = false
-    try {
-      await navigator.clipboard.writeText(text)
-      ok = true
-    } catch {
-      // Fallback: clipboard API requires document focus; execCommand doesn't.
-      try {
-        const ta = document.createElement('textarea')
-        ta.value = text
-        ta.style.position = 'fixed'
-        ta.style.opacity = '0'
-        document.body.appendChild(ta)
-        ta.select()
-        ok = document.execCommand('copy')
-        document.body.removeChild(ta)
-      } catch {
-        ok = false
-      }
-    }
-    if (ok) {
+    if (await copyToClipboard(text)) {
       setCopied(true)
       setTimeout(() => {
         setCopied(false)
@@ -3410,6 +3414,42 @@ function ChatHeader({
       }, 1200)
     } else {
       alert('Could not copy to clipboard')
+      setMenuOpen(false)
+    }
+  }
+
+  async function doCopyContext() {
+    // 087: copy the agent's whole assembled context (system prompt + tool
+    // schemas + the history the next turn would send) from the core endpoint.
+    if (!activeId || ctxState === 'busy') return
+    setCtxState('busy')
+    try {
+      const t = getToken()
+      const r = await fetch(`/api/conversations/${activeId}/context/text`, {
+        headers: t ? { Authorization: `Bearer ${t}` } : undefined,
+      })
+      if (r.status === 404) {
+        alert('Copy agent context needs a newer Luna core (0.85.002+).')
+        setCtxState('idle')
+        setMenuOpen(false)
+        return
+      }
+      if (!r.ok) throw new Error(`${r.status}`)
+      const text = String((await r.json()).text ?? '')
+      if (text && (await copyToClipboard(text))) {
+        setCtxState('copied')
+        setTimeout(() => {
+          setCtxState('idle')
+          setMenuOpen(false)
+        }, 1200)
+      } else {
+        alert('Could not copy the agent context')
+        setCtxState('idle')
+        setMenuOpen(false)
+      }
+    } catch {
+      alert('Could not fetch the agent context')
+      setCtxState('idle')
       setMenuOpen(false)
     }
   }
@@ -3477,6 +3517,23 @@ function ChatHeader({
                   >
                     {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                     {copied ? 'Copied!' : 'Copy conversation'}
+                  </button>
+                  <button
+                    onClick={() => doCopyContext()}
+                    className={cn(
+                      'w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-white/10',
+                      ctxState === 'copied' ? 'text-emerald-400' : 'text-ink-200',
+                    )}
+                    data-testid="chat-header-copy-context"
+                  >
+                    {ctxState === 'copied' ? (
+                      <Check className="w-3.5 h-3.5" />
+                    ) : ctxState === 'busy' ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <FileText className="w-3.5 h-3.5" />
+                    )}
+                    {ctxState === 'copied' ? 'Copied!' : ctxState === 'busy' ? 'Fetching context…' : 'Copy agent context'}
                   </button>
                   <button
                     onClick={() => { setMenuOpen(false); setDraft(activeTitle || ''); setRenaming(true) }}
