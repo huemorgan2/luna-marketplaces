@@ -2860,22 +2860,23 @@ function Composer({
             className="block w-full bg-transparent resize-none px-4 py-3 text-ink-50 placeholder-ink-500 outline-none"
             style={{ minHeight: 44 }}
           />
-          {(toolNames.length > 0 || offline) && (
-            <div className="text-[11px] text-ink-500 flex items-center gap-2 min-w-0 px-3 pb-1">
-              {toolNames.length > 0 ? (
-                <>
-                  <Loader2 className="w-3 h-3 animate-spin text-luna-300" />
-                  <span className="text-luna-300 truncate">working… {toolNames.join(', ')}</span>
-                </>
-              ) : (
-                <span className="text-rose-400">offline — reconnecting…</span>
-              )}
-            </div>
-          )}
           {/* 031 WhatsApp-style: while streaming show Stop, but also a Send
               the moment there's text to fire — the user can pile on messages
-              any time and Luna ingests each at the next step boundary. */}
+              any time and Luna ingests each at the next step boundary. The
+              working/offline status shares this row, left of the buttons. */}
           <div className="flex items-center justify-end gap-2 px-2 pb-2">
+            {(toolNames.length > 0 || offline) && (
+              <div className="flex-1 text-[11px] text-ink-500 flex items-center gap-2 min-w-0 pl-1">
+                {toolNames.length > 0 ? (
+                  <>
+                    <Loader2 className="w-3 h-3 animate-spin text-luna-300" />
+                    <span className="text-luna-300 truncate">working… {toolNames.join(', ')}</span>
+                  </>
+                ) : (
+                  <span className="text-rose-400">offline — reconnecting…</span>
+                )}
+              </div>
+            )}
             {/* 008.95: attach files (paperclip). Paste and drag-drop work too. */}
             <input
               ref={fileInputRef}
