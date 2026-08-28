@@ -32,6 +32,7 @@ import { InlineSecretForm } from './InlineSecretForm'
 import { TaskPlanCard } from './TaskPlanCard'
 import { LiveRunList, applyLiveEvent, isLiveEvent, type LiveEvent, type LiveRun } from './LiveRunBlock'
 import { composerWidgets } from '../lib/composerWidgets'
+import { matchesFrustration, alertSuppressed, suppressAlert } from '../lib/chatAlerts'
 import { groupApprovals, isAutoApproved, type ApprovalRecord } from '@luna/lib/approvalGroups'
 import { AgentAvatar } from '@luna/components/AgentAvatar'
 import { ModelPickerMenu } from '@luna/components/ModelPickerMenu'
@@ -536,6 +537,23 @@ export function ChatPanel({
   // as activeId changes (the ref-update effect below runs first).
   const activeIdRef = useRef<string | null>(activeId)
   useEffect(() => { activeIdRef.current = activeId }, [activeId])
+
+  // 011: agent-behaviour feedback banner — exists only when plugin-feedback
+  // is installed & enabled (its entry shows up in /api/ui/plugins).
+  const [hasFeedback, setHasFeedback] = useState(false)
+  const [feedbackAlertConv, setFeedbackAlertConv] = useState<string | null>(null)
+  useEffect(() => {
+    let alive = true
+    try {
+      // Optional-call guard: absent in older libs and in test api mocks.
+      api.uiPlugins?.()
+        .then((entries) => {
+          if (alive) setHasFeedback(entries.some((e) => e.name === 'plugin-feedback'))
+        })
+        .catch(() => { /* no registry → no banner; never blocks the composer */ })
+    } catch { /* same: banner just stays off */ }
+    return () => { alive = false }
+  }, [])
   useEffect(() => {
     try {
       const key = draftKey(activeIdRef.current)
@@ -1663,6 +1681,16 @@ export function ChatPanel({
     const stagedItems = fromBridge ? [] : stagedRef.current.filter((x) => x.status !== 'error')
     if (!text && !stagedItems.length) return
 
+    // 011: regex frustration check on the user's OWN typed text (bridge sends
+    // come from plugin cards — skip). Fires at most once per conversation per
+    // cooldown window, and only when plugin-feedback is installed.
+    if (!fromBridge && hasFeedback && text && !text.startsWith('/')) {
+      const fbConv = activeIdRef.current
+      if (fbConv && !alertSuppressed(fbConv) && matchesFrustration(text)) {
+        setFeedbackAlertConv(fbConv)
+      }
+    }
+
     // 073/phase002: /condense — summarize the conversation's older head now.
     // A command, not a message: nothing is sent to the agent.
     if (text === '/condense') {
@@ -2152,7 +2180,30 @@ export function ChatPanel({
           }}
         />
 
-        <div ref={scrollRef} onScroll={handleScroll} className={cn('flex-1 overflow-y-auto overflow-x-hidden overscroll-contain', dense ? 'px-3 py-3' : 'px-6 py-6')}>
+        {/* 011: top padding moved off the container so alerts can sit flush;
+            the spacer below restores the original message offset. */}
+        <div ref={scrollRef} onScroll={handleScroll} className={cn('flex-1 overflow-y-auto overflow-x-hidden overscroll-contain', dense ? 'px-3 pb-3' : 'px-6 pb-6')}>
+          {hasFeedback && feedbackAlertConv !== null && feedbackAlertConv === activeId && (
+            <AgentFeedbackBanner
+              onVerdict={(v) => {
+                suppressAlert(feedbackAlertConv)
+                setFeedbackAlertConv(null)
+                window.postMessage(
+                  {
+                    type: 'luna-navigate',
+                    section: 'feedback',
+                    target: `compose?verdict=${v}&conversation=${feedbackAlertConv}`,
+                  },
+                  window.location.origin,
+                )
+              }}
+              onDismiss={() => {
+                suppressAlert(feedbackAlertConv)
+                setFeedbackAlertConv(null)
+              }}
+            />
+          )}
+          <div aria-hidden className={dense ? 'h-3' : 'h-6'} />
           {loadingMessages && (
             <div className="flex items-center justify-center py-12 text-ink-400 text-sm gap-2">
               <Loader2 className="w-4 h-4 animate-spin" />
@@ -3307,6 +3358,43 @@ function EmptyState({ name, emoji, avatarUrl, ownerName }: { name: string; emoji
 }
 
 // 005.917: chat header with conversation actions menu (copy/rename/delete).
+// 011: one-line Cursor-style alert pinned to the top of the messages area.
+// Exported for tests. Lives INSIDE the scroll container (sticky), narrower
+// than the message column, and inherently a single line.
+export function AgentFeedbackBanner({
+  onVerdict,
+  onDismiss,
+}: {
+  onVerdict: (verdict: 'good' | 'mediocre' | 'bad') => void
+  onDismiss: () => void
+}) {
+  return (
+    <div data-testid="agent-feedback-alert" className="sticky top-0 z-30 pt-1.5 pb-1">
+      <div className="mx-auto w-fit max-w-xl flex items-center gap-2 bg-ink-800 border border-white/10 rounded-lg px-3 py-1.5 shadow-sm">
+        <span className="text-[13px] text-ink-200 truncate">Is the agent doing a good job?</span>
+        {(['good', 'mediocre', 'bad'] as const).map((v) => (
+          <button
+            key={v}
+            data-testid={`agent-feedback-${v}`}
+            onClick={() => onVerdict(v)}
+            className="text-[12px] px-2 py-0.5 rounded-full border border-white/10 text-ink-200 hover:bg-white/10 whitespace-nowrap capitalize"
+          >
+            {v}
+          </button>
+        ))}
+        <button
+          data-testid="agent-feedback-dismiss"
+          aria-label="Dismiss"
+          onClick={onDismiss}
+          className="ml-1 shrink-0 text-ink-500 hover:text-ink-200"
+        >
+          <X className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </div>
+  )
+}
+
 async function copyToClipboard(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text)
