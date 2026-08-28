@@ -2260,28 +2260,9 @@ export function ChatPanel({
         />
 
         {/* 011: top padding moved off the container so alerts can sit flush;
-            the spacer below restores the original message offset. */}
+            the spacer below restores the original message offset.
+            013: the feedback banner moved out — it docks onto the composer. */}
         <div ref={scrollRef} onScroll={handleScroll} className={cn('flex-1 overflow-y-auto overflow-x-hidden overscroll-contain', dense ? 'px-3 pb-3' : 'px-6 pb-6')}>
-          {hasFeedback && feedbackAlertConv !== null && feedbackAlertConv === activeId && (
-            <AgentFeedbackBanner
-              onVerdict={(v) => {
-                suppressAlert(feedbackAlertConv)
-                setFeedbackAlertConv(null)
-                window.postMessage(
-                  {
-                    type: 'luna-navigate',
-                    section: 'feedback',
-                    target: `compose?verdict=${v}&conversation=${feedbackAlertConv}`,
-                  },
-                  window.location.origin,
-                )
-              }}
-              onDismiss={() => {
-                suppressAlert(feedbackAlertConv)
-                setFeedbackAlertConv(null)
-              }}
-            />
-          )}
           <div aria-hidden className={dense ? 'h-3' : 'h-6'} />
           {loadingMessages && (
             <div className="flex items-center justify-center py-12 text-ink-400 text-sm gap-2">
@@ -2368,6 +2349,28 @@ export function ChatPanel({
           </div>
 
           <Composer
+            banner={
+              hasFeedback && feedbackAlertConv !== null && feedbackAlertConv === activeId ? (
+                <AgentFeedbackBanner
+                  onVerdict={(v) => {
+                    suppressAlert(feedbackAlertConv)
+                    setFeedbackAlertConv(null)
+                    window.postMessage(
+                      {
+                        type: 'luna-navigate',
+                        section: 'feedback',
+                        target: `compose?verdict=${v}&conversation=${feedbackAlertConv}`,
+                      },
+                      window.location.origin,
+                    )
+                  }}
+                  onDismiss={() => {
+                    suppressAlert(feedbackAlertConv)
+                    setFeedbackAlertConv(null)
+                  }}
+                />
+              ) : null
+            }
             value={input}
             onChange={setInput}
             onSubmit={send}
@@ -2921,8 +2924,10 @@ function WorkingTools({ toolNames }: { toolNames: string[] }) {
 function Composer({
   value, onChange, onSubmit, streaming, condensing = false, stopStage, onStop,
   toolNames, offline, contextStatus, staged, onAttach, onRemoveStaged,
-  focusRef,
+  focusRef, banner,
 }: {
+  /** 013: alert tab docked onto the box's top edge (e.g. agent feedback). */
+  banner?: React.ReactNode
   value: string
   onChange: (v: string) => void
   onSubmit: () => void
@@ -2991,6 +2996,8 @@ function Composer({
   return (
     <div className="px-6 py-4">
       <div className="max-w-3xl mx-auto">
+        {/* 013: docked alert tab — sits on the box's flat top edge. */}
+        {banner}
         {/* The textarea gets its own row; attach + Send/Stop live on a row
             BELOW it (they used to overlay the box's corner and collide with
             the text). */}
@@ -3437,9 +3444,10 @@ function EmptyState({ name, emoji, avatarUrl, ownerName }: { name: string; emoji
 }
 
 // 005.917: chat header with conversation actions menu (copy/rename/delete).
-// 011: one-line Cursor-style alert pinned to the top of the messages area.
-// Exported for tests. Lives INSIDE the scroll container (sticky), narrower
-// than the message column, and inherently a single line.
+// 011/013: one-line feedback alert docked to the composer's top edge — a tab
+// narrower than the box (clear of its rounded corners), top corners only, no
+// bottom border; -mb-px + solid bg paint over the box's top border so the
+// seam between the tab and the message box has no dark line.
 export function AgentFeedbackBanner({
   onVerdict,
   onDismiss,
@@ -3448,8 +3456,8 @@ export function AgentFeedbackBanner({
   onDismiss: () => void
 }) {
   return (
-    <div data-testid="agent-feedback-alert" className="sticky top-0 z-30 pt-1.5 pb-1">
-      <div className="mx-auto w-fit max-w-xl flex items-center gap-2 bg-ink-800 border border-white/10 rounded-lg px-3 py-1.5 shadow-sm">
+    <div data-testid="agent-feedback-alert" className="relative z-10 px-6 -mb-px">
+      <div className="mx-auto w-fit max-w-full flex items-center gap-2 bg-ink-900 border border-b-0 border-white/10 rounded-t-lg px-3 py-1.5">
         <span className="text-[13px] text-ink-200 truncate">Is the agent doing a good job?</span>
         {(['good', 'mediocre', 'bad'] as const).map((v) => (
           <button
