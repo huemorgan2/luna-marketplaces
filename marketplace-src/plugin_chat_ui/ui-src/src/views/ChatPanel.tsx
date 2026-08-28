@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Plus, Send, Trash2, Loader2, MoreHorizontal, Pencil, Check, X, Copy, ChevronDown, ChevronLeft, Info, Square, Clock, Wrench, Paperclip, FileText, Brain, Zap, Hand } from 'lucide-react'
+import { Plus, Send, Trash2, Loader2, MoreHorizontal, MoreVertical, Pencil, Check, X, Copy, ChevronDown, ChevronLeft, Info, Square, Clock, Wrench, Paperclip, FileText, Brain, Zap, Hand } from 'lucide-react'
 import { cn } from '@luna/lib/cn'
 import { agentName, useIdentity } from '@luna/lib/identityStore'
 import {
@@ -2415,6 +2415,93 @@ export const ReasoningBlock = memo(function ReasoningBlock({
   )
 })
 
+/** Hover ⋮ on a bubble's top-right corner: copy the message, and the menu's
+ *  footer shows when it was sent. Same clipboard strategy as the transcript
+ *  copy (clipboard API, execCommand fallback). */
+function MessageMenu({ message }: { message: UIMessage }) {
+  const [open, setOpen] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
+  async function doCopy() {
+    const text = message.content || ''
+    let ok = false
+    try {
+      await navigator.clipboard.writeText(text)
+      ok = true
+    } catch {
+      try {
+        const ta = document.createElement('textarea')
+        ta.value = text
+        ta.style.position = 'fixed'
+        ta.style.opacity = '0'
+        document.body.appendChild(ta)
+        ta.select()
+        ok = document.execCommand('copy')
+        document.body.removeChild(ta)
+      } catch {
+        ok = false
+      }
+    }
+    if (ok) {
+      setCopied(true)
+      setTimeout(() => {
+        setCopied(false)
+        setOpen(false)
+      }, 1200)
+    } else {
+      setOpen(false)
+    }
+  }
+  const sent = message.created_at ? new Date(message.created_at) : null
+  const stamp = sent && !isNaN(sent.getTime())
+    ? sent.toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })
+    : null
+  return (
+    <div ref={menuRef} className="absolute -top-1.5 -right-1.5 z-10">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-label="Message actions"
+        data-testid="message-menu-btn"
+        className={cn(
+          'p-1 rounded-md border border-white/10 bg-ink-800 text-ink-400 hover:text-ink-200 hover:bg-ink-700 transition-opacity',
+          open ? 'opacity-100' : 'opacity-0 group-hover/msg:opacity-100 focus-visible:opacity-100',
+        )}
+      >
+        <MoreVertical className="w-3.5 h-3.5" />
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full z-[100] mt-1 w-44 rounded-lg bg-ink-800 py-1 shadow-xl border border-white/10">
+          <button
+            onClick={doCopy}
+            className={cn(
+              'w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-white/10',
+              copied ? 'text-emerald-400' : 'text-ink-200',
+            )}
+            data-testid="message-menu-copy"
+          >
+            {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+            {copied ? 'Copied!' : 'Copy message'}
+          </button>
+          {stamp && (
+            <div className="mt-1 px-3 py-1.5 text-[11px] text-ink-500 border-t border-white/10 flex items-center gap-1.5" data-testid="message-menu-time">
+              <Clock className="w-3 h-3" /> {stamp}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function Bubble({ message, emoji, avatarUrl }: { message: UIMessage; emoji: string; avatarUrl?: string | null }) {
   const isUser = message.role === 'user'
   // 009.001/phase02 (E12): any non-null source is an automation origin —
@@ -2425,7 +2512,7 @@ function Bubble({ message, emoji, avatarUrl }: { message: UIMessage; emoji: stri
   const isReflection = autoSource === 'curiosity'
   const isAuto = autoSource !== null && !isReflection
   return (
-    <div className={cn('flex gap-3 fade-in', isUser ? 'justify-end' : 'justify-start')}>
+    <div className={cn('flex gap-3 fade-in group/msg', isUser ? 'justify-end' : 'justify-start')}>
       {!isUser && (
         <div className={cn(
           'w-8 h-8 rounded-full grid place-items-center text-lg shrink-0 mt-0.5 border overflow-hidden',
@@ -2442,9 +2529,22 @@ function Bubble({ message, emoji, avatarUrl }: { message: UIMessage; emoji: stri
               : <AgentAvatar avatarUrl={avatarUrl} emoji={emoji} displaySize={32} imgClassName="w-full h-full object-cover" />}
         </div>
       )}
+      {/* Width caps live on this relative wrapper (min-w-0 keeps the flex
+          automatic minimum from undoing them) so the hover ⋮ can overhang the
+          bubble's corner without being clipped by its overflow-hidden. */}
       <div
         className={cn(
-          'max-w-[80%] rounded-2xl px-4 py-2.5 text-[15px] leading-relaxed overflow-hidden break-words',
+          'relative min-w-0 max-w-[80%]',
+          // 078: a bubble carrying a live run block or a tool card takes the
+          // full column (capped at 80%) — code and output need the width; a
+          // shrink-to-fit bubble would squeeze them to the iframe's 300px.
+          (!!message.live_runs?.length || !!message.embed_iframe) && 'w-full',
+        )}
+      >
+      {!message.pending && !!message.content && <MessageMenu message={message} />}
+      <div
+        className={cn(
+          'max-w-full rounded-2xl px-4 py-2.5 text-[15px] leading-relaxed overflow-hidden break-words',
           isUser
             ? 'bg-luna-600 text-white shadow-lg shadow-luna-900/40'
             : isReflection
@@ -2455,10 +2555,6 @@ function Bubble({ message, emoji, avatarUrl }: { message: UIMessage; emoji: stri
           // 031: a message sent while the agent works shows immediately, dimmed
           // until the server acks the queue (then it becomes a normal bubble).
           message.queued && 'opacity-60',
-          // 078: a bubble carrying a live run block or a tool card takes the
-          // full column (capped at 80%) — code and output need the width; a
-          // shrink-to-fit bubble would squeeze them to the iframe's 300px.
-          (!!message.live_runs?.length || !!message.embed_iframe) && 'w-full',
         )}
       >
         {isUser ? (
@@ -2521,6 +2617,7 @@ function Bubble({ message, emoji, avatarUrl }: { message: UIMessage; emoji: stri
             <Zap className="w-3 h-3" aria-hidden /> Auto sent from {autoSource} run
           </div>
         )}
+      </div>
       </div>
     </div>
   )
@@ -2731,12 +2828,12 @@ function Composer({
   return (
     <div className="px-6 py-4">
       <div className="max-w-3xl mx-auto">
-        {/* 043 item 6: the box is `relative` and the Send/Stop buttons OVERLAY
-            its bottom-right corner — text keeps flowing on the button's line
-            and is only hidden where the button actually sits. */}
+        {/* The textarea gets its own row; attach + Send/Stop live on a row
+            BELOW it (they used to overlay the box's corner and collide with
+            the text). */}
         <div
           className={cn(
-            'relative bg-ink-900/70 border border-white/10 rounded-2xl shadow-2xl shadow-luna-900/10 focus-within:border-luna-500/50 focus-within:ring-2 focus-within:ring-luna-500/20 transition',
+            'bg-ink-900/70 border border-white/10 rounded-2xl shadow-2xl shadow-luna-900/10 focus-within:border-luna-500/50 focus-within:ring-2 focus-within:ring-luna-500/20 transition',
             dragOver && 'border-luna-500/60 ring-2 ring-luna-500/30',
           )}
           onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
@@ -2764,7 +2861,7 @@ function Composer({
             style={{ minHeight: 44 }}
           />
           {(toolNames.length > 0 || offline) && (
-            <div className="text-[11px] text-ink-500 flex items-center gap-2 min-w-0 px-3 pb-2 pr-44">
+            <div className="text-[11px] text-ink-500 flex items-center gap-2 min-w-0 px-3 pb-1">
               {toolNames.length > 0 ? (
                 <>
                   <Loader2 className="w-3 h-3 animate-spin text-luna-300" />
@@ -2778,7 +2875,7 @@ function Composer({
           {/* 031 WhatsApp-style: while streaming show Stop, but also a Send
               the moment there's text to fire — the user can pile on messages
               any time and Luna ingests each at the next step boundary. */}
-          <div className="absolute bottom-1.5 right-1.5 flex items-center gap-2">
+          <div className="flex items-center justify-end gap-2 px-2 pb-2">
             {/* 008.95: attach files (paperclip). Paste and drag-drop work too. */}
             <input
               ref={fileInputRef}
@@ -2806,7 +2903,7 @@ function Composer({
                 onClick={onSubmit}
                 disabled={offline}
                 title={`Send now — ${name} reads it mid-turn`}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-luna-600 hover:bg-luna-500 disabled:bg-ink-800 disabled:text-ink-500 transition text-white text-sm font-medium py-1.5 px-3 max-md:py-2.5"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-luna-600 hover:bg-luna-500 disabled:bg-ink-800 disabled:text-ink-500 transition text-white text-sm font-medium py-1 px-3 max-md:py-2"
               >
                 <Send className="w-3.5 h-3.5" />
                 Send
@@ -2817,7 +2914,7 @@ function Composer({
                 onClick={onStop}
                 title={stopStage >= 1 ? 'Hard-stop now' : 'Stop after the current step'}
                 className={cn(
-                  'inline-flex items-center gap-1.5 rounded-lg transition text-white text-sm font-medium py-1.5 px-3 max-md:py-2.5',
+                  'inline-flex items-center gap-1.5 rounded-lg transition text-white text-sm font-medium py-1 px-3 max-md:py-2',
                   stopStage >= 1
                     ? 'bg-rose-600 hover:bg-rose-500 shadow-lg shadow-rose-900/40'
                     : 'bg-ink-700 hover:bg-ink-600',
@@ -2830,7 +2927,7 @@ function Composer({
               <button
                 onClick={onSubmit}
                 disabled={offline || condensing || !hasSendable}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-luna-600 hover:bg-luna-500 disabled:bg-ink-800 disabled:text-ink-500 transition text-white text-sm font-medium py-1.5 px-3 max-md:py-2.5"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-luna-600 hover:bg-luna-500 disabled:bg-ink-800 disabled:text-ink-500 transition text-white text-sm font-medium py-1 px-3 max-md:py-2"
               >
                 <Send className="w-3.5 h-3.5" />
                 Send
