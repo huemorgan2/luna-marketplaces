@@ -16,7 +16,18 @@
       "@luna/*": ["../../../luna/ui/src/*"],
       "react": ["./node_modules/@types/react", "./node_modules/react"],
       "react/jsx-runtime": ["./node_modules/@types/react/jsx-runtime", "./node_modules/react/jsx-runtime"],
-      "lucide-react": ["./node_modules/lucide-react"]
+      "lucide-react": ["./node_modules/lucide-react"],
+      // 089: the remaining bare deps the pulled-in @luna files import, pinned
+      // to THIS package's node_modules like the vite depPins — a fresh clone
+      // has no luna/ui/node_modules for tsc's walk-up to find.
+      "@microsoft/fetch-event-source": ["./node_modules/@microsoft/fetch-event-source"],
+      "clsx": ["./node_modules/clsx"],
+      "tailwind-merge": ["./node_modules/tailwind-merge"],
+      "react-markdown": ["./node_modules/react-markdown"],
+      "remark-gfm": ["./node_modules/remark-gfm"],
+      "react-dom": ["./node_modules/@types/react-dom", "./node_modules/react-dom"],
+      "react-dom/client": ["./node_modules/@types/react-dom/client", "./node_modules/react-dom/client"],
+      "zustand": ["./node_modules/zustand"]
     },
 
     /* Bundler mode */

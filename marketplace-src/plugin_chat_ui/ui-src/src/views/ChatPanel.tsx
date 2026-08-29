@@ -33,6 +33,11 @@ import { TaskPlanCard } from './TaskPlanCard'
 import { LiveRunList, applyLiveEvent, isLiveEvent, type LiveEvent, type LiveRun } from './LiveRunBlock'
 import { composerWidgets } from '../lib/composerWidgets'
 import { matchesFrustration, alertSuppressed, suppressAlert } from '../lib/chatAlerts'
+import {
+  STATE_OPTIONS, DEFAULT_STATE, convKind, convState, sortOpsFirst,
+  patchConversationState, subscribeConvStateEvents,
+  type ConversationKind, type ConvMeta,
+} from '../lib/convState'
 import { groupApprovals, isAutoApproved, type ApprovalRecord } from '@luna/lib/approvalGroups'
 import { AgentAvatar } from '@luna/components/AgentAvatar'
 import { ModelPickerMenu } from '@luna/components/ModelPickerMenu'
@@ -398,6 +403,20 @@ const EMPTY_TURN: TurnUI = {
 }
 const NO_MESSAGES: UIMessage[] = []
 
+// 089: a conversation row as this UI handles it — the core summary plus the
+// build/operate fields newer servers return (kind/state). Older servers omit
+// them and every helper defaults to a plain building conversation.
+type ConvRow = ConversationSummary & ConvMeta
+
+// 089: one tool call as tracked by the wrench progress chip. Lives OUTSIDE
+// TurnUI on purpose: TurnUI.toolNames is wiped when the stream closes, while
+// the chip's final "🔧 n tools" summary must survive the turn.
+interface ToolLogEntry {
+  name: string
+  status: 'running' | 'done' | 'error'
+}
+const NO_TOOL_LOG: ToolLogEntry[] = []
+
 export function ChatPanel({
   identity,
   onIdentityChange,
@@ -422,8 +441,10 @@ export function ChatPanel({
 }) {
   // 008.995: seed from the last-known list so warm boots paint instantly;
   // refreshConversations() below replaces it (stale-while-revalidate).
-  const [conversations, setConversations] = useState<ConversationSummary[]>(
-    () => cachedGet<ConversationSummary[]>('conversations') ?? [],
+  // 089: ops conversations pin to the top of the list, everywhere the list
+  // is (re)built — cache seed, refresh, create, live state events.
+  const [conversations, setConversations] = useState<ConvRow[]>(
+    () => sortOpsFirst(cachedGet<ConvRow[]>('conversations') ?? []),
   )
   const [activeId, setActiveIdRaw] = useState<string | null>(initialConversationId || null)
 
@@ -514,6 +535,45 @@ export function ChatPanel({
     else streamingConvsRef.current.delete(key)
     patchTurn(key, { streaming: on })
   }, [patchTurn])
+  // 089: per-conversation tool log behind the wrench progress chip. Reset at
+  // the START of the next user turn (never at stream close) so the collapsed
+  // "🔧 n tools" receipt persists after the turn ends.
+  const [toolLog, setToolLog] = useState<Record<string, ToolLogEntry[]>>({})
+  const resetToolLog = useCallback((convId: string | null) => {
+    const key = convId ?? ''
+    setToolLog((prev) => (prev[key]?.length ? { ...prev, [key]: [] } : prev))
+  }, [])
+  const logToolCalls = useCallback((convId: string | null, names: string[]) => {
+    if (!names.length) return
+    const key = convId ?? ''
+    setToolLog((prev) => ({
+      ...prev,
+      [key]: [...(prev[key] ?? []), ...names.map((name) => ({ name, status: 'running' as const }))],
+    }))
+  }, [])
+  const logToolResult = useCallback((convId: string | null, name: string, result: string) => {
+    const key = convId ?? ''
+    // Heuristic error accent: tool errors come back as prose, not a flag.
+    const errored = /^\s*(error|⚠|❌|traceback)/i.test(result || '')
+    setToolLog((prev) => {
+      const cur = prev[key]
+      if (!cur?.length) return prev
+      const idx = cur.findIndex((e) => e.status === 'running' && e.name === name)
+      if (idx < 0) return prev
+      const next = [...cur]
+      next[idx] = { ...next[idx], status: errored ? 'error' : 'done' }
+      return { ...prev, [key]: next }
+    })
+  }, [])
+  // A stream that closes mid-call must not leave phantom spinners in the log.
+  const settleToolLog = useCallback((convId: string | null) => {
+    const key = convId ?? ''
+    setToolLog((prev) => {
+      const cur = prev[key]
+      if (!cur?.some((e) => e.status === 'running')) return prev
+      return { ...prev, [key]: cur.map((e) => (e.status === 'running' ? { ...e, status: 'done' as const } : e)) }
+    })
+  }, [])
   // The active conversation's live-turn view — same names the render code and
   // composer always used.
   const turn = turns[activeId ?? ''] ?? EMPTY_TURN
@@ -991,6 +1051,10 @@ export function ChatPanel({
     continueConversation(convId, {
       onDelta: (delta) => queueDelta(convId, currentMsgId, delta),
       onReasoning: (r) => queueReasoning(currentMsgId, r.text, r.ms),
+      // 089: a continuation is the same logical turn — its tool calls keep
+      // counting on the same chip (no reset here).
+      onToolCall: (names) => logToolCalls(convId, names),
+      onToolResult: (name, result) => logToolResult(convId, name, result),
       onNewMessage: (id) => {
         currentMsgId = id
         setConvMessages(convId, (m) => [
@@ -1063,6 +1127,7 @@ export function ChatPanel({
         flushLiveNow()
         setConvStreaming(convId, false)
         patchTurn(convId, { waitLine: null })
+        settleToolLog(convId)
         // 012: the drain belongs to ITS conversation — chain even if the user
         // switched away (isolated state makes the background turn safe).
         if (needsChain) {
@@ -1103,7 +1168,11 @@ export function ChatPanel({
       await attachTurnStream(convId, {
         onDelta: (delta) => queueDelta(convId, currentMsgId, delta),
         onReasoning: (r) => queueReasoning(currentMsgId, r.text, r.ms),
-        onToolCall: (names) => patchTurn(convId, (t) => ({ toolNames: [...t.toolNames, ...names] })),
+        onToolCall: (names) => {
+          patchTurn(convId, (t) => ({ toolNames: [...t.toolNames, ...names] }))
+          logToolCalls(convId, names)
+        },
+        onToolResult: (name, result) => logToolResult(convId, name, result),
         onNewMessage: (id) => {
           currentMsgId = id
           setConvMessages(convId, (m) => [
@@ -1156,11 +1225,19 @@ export function ChatPanel({
       }
       setConvStreaming(convId, false)
       patchTurn(convId, { toolNames: [], waitLine: null, condensing: false })
+      settleToolLog(convId)
       if (needsCont) {
         setTimeout(() => triggerContinuation(convId), 400)
       }
     }
   }
+
+  // 089: approval ids auto-approved DURING a live turn we're painting. Their
+  // timeline receipts are suppressed — the wrench progress chip is the one
+  // in-turn tool surface (the old receipts made the timeline grow every call).
+  // Rehydrated history (older turns, reloads) is NOT tagged and keeps its
+  // coalesced AutoToolReceipts rows.
+  const liveAutoIdsRef = useRef<Set<string>>(new Set())
 
   // Subscribe once to the global approval event stream. We keep every record
   // for the session and filter by conversation at render time, so switching
@@ -1177,6 +1254,13 @@ export function ChatPanel({
           ),
         onDecided: (info) => {
           const id = (info as { request_id?: string; id?: string }).request_id ?? (info as { id?: string }).id
+          // 089: an auto-approval landing while its conversation streams is
+          // in-turn tool activity — the chip covers it, the timeline doesn't.
+          const decidedConv = (info as { conversation_id?: string }).conversation_id
+          if (id && (info as { auto?: boolean }).auto === true
+              && decidedConv && streamingConvsRef.current.has(decidedConv)) {
+            liveAutoIdsRef.current.add(id)
+          }
           setApprovals((prev) =>
             prev.map((a) =>
               a.req.id === id
@@ -1360,6 +1444,25 @@ export function ChatPanel({
     return () => ctrl.abort()
   }, [])
 
+  // 089: live conversation-state sync. Another surface (the agent, another
+  // tab, the server's ops loop) changed a conversation's state — patch the
+  // row in place so the sidebar and the composer pulldown follow. The state
+  // is NEVER flipped programmatically from here beyond mirroring the server.
+  useEffect(() => {
+    const stop = subscribeConvStateEvents((ev) => {
+      setConversations((prev) =>
+        sortOpsFirst(
+          prev.map((c) =>
+            c.id === ev.conversation_id
+              ? { ...c, ...(ev.kind ? { kind: ev.kind } : {}), state: ev.state ?? c.state }
+              : c,
+          ),
+        ),
+      )
+    })
+    return stop
+  }, [])
+
   // 005.913 — hidden Cmd+D / Ctrl+D debug mode. State is per-tab; activating
   // it backfills the per-conversation ring buffer and opens a parallel SSE
   // (topics=*) so live tool calls / bus events / approvals flow into the
@@ -1408,7 +1511,7 @@ export function ChatPanel({
   const refreshConversations = useCallback(async () => {
     try {
       const c = await api.conversations()
-      setConversations(c)
+      setConversations(sortOpsFirst(c as ConvRow[]))
       return c
     } catch {
       return []
@@ -1416,6 +1519,18 @@ export function ChatPanel({
       setLoadingConvs(false)
     }
   }, [])
+
+  // 089: the composer's state pulldown changed — the ONLY place this client
+  // writes a conversation state (user interaction; never programmatic).
+  // Optimistic row patch, PATCH to the server, re-sync from it on failure.
+  const changeConvState = useCallback((convId: string, state: string) => {
+    setConversations((prev) =>
+      prev.map((c) => (c.id === convId ? { ...c, state } : c)),
+    )
+    void patchConversationState(convId, state).catch(() => {
+      void refreshConversations()
+    })
+  }, [refreshConversations])
 
   // 028: the warm-boot cache must mirror EVERY list mutation (delete, create,
   // rename), not just refreshes — otherwise a deleted conversation repaints
@@ -1649,7 +1764,7 @@ export function ChatPanel({
 
   async function newConversation() {
     const c = await api.createConversation()
-    setConversations((cs) => [c, ...cs])
+    setConversations((cs) => sortOpsFirst([c as ConvRow, ...cs]))
     setActiveId(c.id)
     activeIdRef.current = c.id
     // A brand-new conversation has no saved draft, so only *restore* one if it
@@ -1870,7 +1985,7 @@ export function ChatPanel({
     if (!convId) {
       try {
         const c = await api.createConversation()
-        setConversations((cs) => [c, ...cs])
+        setConversations((cs) => sortOpsFirst([c as ConvRow, ...cs]))
         convId = c.id
         setActiveId(c.id)
       } catch (e) {
@@ -1902,6 +2017,9 @@ export function ChatPanel({
 
     setConvStreaming(convId, true)
     patchTurn(convId, { toolNames: [], subagent: null })
+    // 089: a NEW user turn starts a fresh tool count; the previous turn's
+    // collapsed "🔧 n tools" receipt lived until exactly this moment.
+    resetToolLog(convId)
     let needsContinuation = false
     const now = new Date().toISOString()
     const userMsg: UIMessage = {
@@ -1931,8 +2049,12 @@ export function ChatPanel({
       await sendMessageStream(convId, text, {
         onDelta: (delta) => queueDelta(convId, currentMsgId, delta),
         onReasoning: (r) => queueReasoning(currentMsgId, r.text, r.ms),
-        onToolCall: (names) => patchTurn(convId, (t) => ({ toolNames: [...t.toolNames, ...names] })),
-        onToolResult: (_name, _result, embed) => {
+        onToolCall: (names) => {
+          patchTurn(convId, (t) => ({ toolNames: [...t.toolNames, ...names] }))
+          logToolCalls(convId, names)
+        },
+        onToolResult: (name, result, embed) => {
+          logToolResult(convId, name, result)
           if (embed?.embed_iframe || embed?.embed_html) {
             const targetId = currentMsgId
             setConvMessages(convId, (m) => {
@@ -2085,6 +2207,9 @@ export function ChatPanel({
       setConvStreaming(convId, false)
       // 073: a stream that died mid-condense must not leave the composer locked.
       patchTurn(convId, { stopStage: 0, toolNames: [], condensing: false, waitLine: null })
+      // 089: turn over — freeze any still-spinning chip entries (the log
+      // itself survives, collapsed to "🔧 n tools", until the next turn).
+      settleToolLog(convId)
       // 012: continuation belongs to the conversation, not the viewport —
       // fire it even if the user switched away (queued drains finish in the
       // background chat instead of dying on switch).
@@ -2177,6 +2302,10 @@ export function ChatPanel({
     togglePlanCollapsed,
     onTurnErrorRetryCb,
     streaming,
+    // 089: receipts for tools auto-approved during a live turn are the wrench
+    // chip's job — suppress their timeline rows (the set mutates in the same
+    // tick as the `approvals` updates this memo already keys on).
+    liveAutoIdsRef.current,
   ), [
     messages, approvals, activeId,
     identity?.emoji, identity?.avatar_url, identity?.name,
@@ -2234,12 +2363,19 @@ export function ChatPanel({
     </>
   )
 
+  // 089: the active row's build/operate meta drives the header chip, the
+  // hidden delete affordance, and the composer's state pulldown.
+  const activeConv = conversations.find((c) => c.id === activeId) ?? null
+  const activeKind: ConversationKind | null = activeConv ? convKind(activeConv) : null
+  const activeState = activeConv ? convState(activeConv) : null
+
   const chatArea = (
     <div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
         <ChatHeader
           identity={identity}
           activeId={activeId}
-          activeTitle={conversations.find((c) => c.id === activeId)?.title || null}
+          activeTitle={activeConv?.title || null}
+          activeOps={activeKind === 'ops'}
           messages={messages}
           debugMode={debugMode}
           debugEvents={debugEvents}
@@ -2280,6 +2416,15 @@ export function ChatPanel({
           )}
           <div className={cn(dense ? 'space-y-3' : 'max-w-3xl mx-auto space-y-5')}>
             {timeline}
+            {/* 089: ONE fixed-height wrench chip carries all in-turn tool
+                activity (count + spinner; click = detail panel). It replaces
+                the per-call receipt rows, so the timeline's height stays
+                constant while tools run. After the turn it settles to the
+                final "🔧 n tools" count until the next turn starts. */}
+            <ToolProgressChip
+              entries={toolLog[activeId ?? ''] ?? NO_TOOL_LOG}
+              streaming={streaming}
+            />
             {/* 049/phase02: the ONE subagent status line — shimmer while
                 running, settles to a muted summary, never becomes a log. */}
             {/* 073: blocking condense — one shimmer line while the pass runs. */}
@@ -2385,6 +2530,11 @@ export function ChatPanel({
             staged={staged}
             onAttach={stageFiles}
             onRemoveStaged={removeStaged}
+            convKind={activeKind}
+            convState={activeState}
+            onConvStateChange={(v) => {
+              if (activeId) changeConvState(activeId, v)
+            }}
           />
         </div>
       </div>
@@ -2893,6 +3043,73 @@ function StagedChip({ item, onRemove }: { item: StagedAttachment; onRemove: () =
  *  (repeat calls get a ×N count) with the name on hover — many tools fit
  *  without truncation. The spinner never shrinks (shrink-0): as a bare flex
  *  child it was the first thing squeezed to micro size by long name lists. */
+// 089: the ONE in-turn tool surface in the timeline. A single fixed-height
+// chip (spinner + 🔧 + running count) whose DOM height never changes while
+// tools run — no per-call rows, no layout jumps. Click toggles a bounded,
+// scrollable detail panel listing every call and its status. When the turn
+// ends the chip settles to "🔧 n tools" (rose accent if any call errored)
+// and stays as the turn's receipt until the next turn starts.
+function ToolProgressChip({ entries, streaming }: { entries: ToolLogEntry[]; streaming: boolean }) {
+  const [open, setOpen] = useState(false)
+  // A fresh turn (log reset) starts collapsed again.
+  useEffect(() => {
+    if (entries.length === 0) setOpen(false)
+  }, [entries.length === 0]) // eslint-disable-line react-hooks/exhaustive-deps
+  if (entries.length === 0) return null
+  const anyError = entries.some((e) => e.status === 'error')
+  const runningEntry = streaming ? [...entries].reverse().find((e) => e.status === 'running') : undefined
+  return (
+    <div className="px-1">
+      <button
+        type="button"
+        data-testid="tool-progress-chip"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className={cn(
+          'inline-flex h-7 max-w-full items-center gap-1.5 rounded-full border bg-transparent px-2.5 text-[11px] leading-none transition hover:bg-white/[0.04]',
+          anyError
+            ? 'border-rose-500/40 text-rose-300'
+            : streaming
+              ? 'border-luna-500/40 text-luna-300'
+              : 'border-white/10 text-ink-400',
+        )}
+        title={streaming ? 'Tools running — click for details' : 'Tools used this turn — click for details'}
+      >
+        {streaming && <Loader2 className="w-3 h-3 shrink-0 animate-spin" />}
+        <span aria-hidden>🔧</span>
+        <span data-testid="tool-progress-count">
+          {streaming ? entries.length : `${entries.length} tool${entries.length === 1 ? '' : 's'}`}
+        </span>
+        {runningEntry && (
+          <span className="truncate max-w-[16rem] text-ink-400">{runningEntry.name}</span>
+        )}
+        <ChevronDown className={cn('w-3 h-3 shrink-0 transition-transform', open && 'rotate-180')} />
+      </button>
+      {open && (
+        <div
+          data-testid="tool-progress-panel"
+          className="mt-1 max-h-44 max-w-md overflow-y-auto rounded-lg border border-white/10 bg-ink-900/80 px-2.5 py-1.5 text-[11px]"
+        >
+          {entries.map((e, i) => (
+            <div key={i} className="flex items-center gap-1.5 leading-5 min-w-0">
+              {e.status === 'running' ? (
+                <Loader2 className="w-3 h-3 shrink-0 animate-spin text-luna-300" />
+              ) : e.status === 'error' ? (
+                <X className="w-3 h-3 shrink-0 text-rose-400" />
+              ) : (
+                <Check className="w-3 h-3 shrink-0 text-emerald-400" />
+              )}
+              <span className={cn('truncate', e.status === 'error' ? 'text-rose-300' : 'text-ink-300')}>
+                {e.name}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function WorkingTools({ toolNames }: { toolNames: string[] }) {
   const compact = toolNames.length > 3 || toolNames.join(', ').length > 34
   const counts = new Map<string, number>()
@@ -2924,7 +3141,7 @@ function WorkingTools({ toolNames }: { toolNames: string[] }) {
 function Composer({
   value, onChange, onSubmit, streaming, condensing = false, stopStage, onStop,
   toolNames, offline, contextStatus, staged, onAttach, onRemoveStaged,
-  focusRef, banner,
+  focusRef, banner, convKind = null, convState = null, onConvStateChange,
 }: {
   /** 013: alert tab docked onto the box's top edge (e.g. agent feedback). */
   banner?: React.ReactNode
@@ -2944,6 +3161,12 @@ function Composer({
   onRemoveStaged: (id: string) => void
   /** 065: chat bridge — receives a thunk that focuses the textarea. */
   focusRef?: React.MutableRefObject<(() => void) | null>
+  /** 089: active conversation's kind — null hides the state pulldown (no conversation yet). */
+  convKind?: ConversationKind | null
+  /** 089: active conversation's effective state (defaulted per kind). */
+  convState?: string | null
+  /** 089: the user picked a state — the ONLY trigger for a state write. */
+  onConvStateChange?: (value: string) => void
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [dragOver, setDragOver] = useState(false)
@@ -3105,6 +3328,31 @@ function Composer({
         </div>
         {/* 008: model selector + context meter live OUTSIDE the message box. */}
         <div className="flex items-center px-1 pt-1.5">
+          {/* 089: conversation-state pulldown — bottom-left, user-driven only.
+              Ops keeps its amber accent; a building chat off its default state
+              gets a subtle luna tint so a non-default mode is visible. */}
+          {convKind && convState && onConvStateChange && (
+            <select
+              data-testid="state-pulldown"
+              value={convState}
+              onChange={(e) => onConvStateChange(e.target.value)}
+              title="Conversation mode"
+              className={cn(
+                'mr-2 shrink-0 appearance-none cursor-pointer rounded-md border bg-transparent px-1.5 py-0.5 text-[11px] outline-none transition hover:bg-white/[0.04]',
+                convKind === 'ops'
+                  ? 'border-amber-500/40 text-amber-300'
+                  : convState !== DEFAULT_STATE[convKind]
+                    ? 'border-luna-500/40 text-luna-300'
+                    : 'border-white/10 text-ink-400',
+              )}
+            >
+              {STATE_OPTIONS[convKind].map((o) => (
+                <option key={o.value} value={o.value} className="bg-ink-900 text-ink-100">
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          )}
           <ComposerModelSelect />
           {contextStatus && (
             <div className="ml-auto">
@@ -3508,6 +3756,7 @@ function ChatHeader({
   identity,
   activeId,
   activeTitle,
+  activeOps = false,
   messages,
   debugMode,
   debugEvents,
@@ -3519,6 +3768,8 @@ function ChatHeader({
   identity: Identity | null
   activeId: string | null
   activeTitle: string | null
+  /** 089: the open conversation is an ops conversation — amber chip, no delete (server 403s it). */
+  activeOps?: boolean
   messages: UIMessage[]
   debugMode: boolean
   debugEvents: DebugEvent[]
@@ -3646,6 +3897,11 @@ function ChatHeader({
           <AgentAvatar avatarUrl={identity?.avatar_url} emoji={identity?.emoji || '🌙'} displaySize={28} priority imgClassName="w-7 h-7 rounded-lg object-cover" />
         </div>
         <div className="font-medium text-ink-100" data-testid="chat-header-agent-name">{agentName(identity)}</div>
+        {/* 089: the open chat is an ops conversation — say so where the eye
+            already is. Amber = attention; same chip anatomy as `debug`. */}
+        {activeOps && (
+          <span data-testid="ops-tag" className="ml-1 text-[10px] font-bold uppercase tracking-wider bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded px-1.5 py-0.5">ops</span>
+        )}
         {debugMode && (
           <span className="ml-1 text-[10px] font-bold uppercase tracking-wider bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded px-1.5 py-0.5">debug</span>
         )}
@@ -3717,13 +3973,17 @@ function ChatHeader({
                   >
                     <Pencil className="w-3.5 h-3.5" /> Rename
                   </button>
-                  <button
-                    onClick={() => { setMenuOpen(false); doDelete() }}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-rose-400 hover:bg-white/10"
-                    data-testid="chat-header-delete"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" /> Delete
-                  </button>
+                  {/* 089: ops conversations can't be deleted (the server 403s
+                      the DELETE) — no dead affordance, the item is absent. */}
+                  {!activeOps && (
+                    <button
+                      onClick={() => { setMenuOpen(false); doDelete() }}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-rose-400 hover:bg-white/10"
+                      data-testid="chat-header-delete"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" /> Delete
+                    </button>
+                  )}
                 </div>
               </>
             )}
@@ -3742,26 +4002,39 @@ function ConversationItem({
   onSelect,
   big,
 }: {
-  conv: ConversationSummary
+  conv: ConversationSummary & ConvMeta
   active: boolean
   onSelect: () => void
   /** 057: mobile list rows — 44px+ touch targets */
   big?: boolean
 }) {
+  // 089: ops conversations read amber (title + border) and carry an OPS chip
+  // — they're the rows that watch production, pinned above the build chats.
+  const ops = convKind(conv) === 'ops'
   return (
     <button
       onClick={onSelect}
       data-testid="conv-item"
       className={cn(
-        'w-full text-left px-3 rounded-lg text-sm transition truncate',
+        'w-full text-left px-3 rounded-lg text-sm transition flex items-center gap-1.5 min-w-0',
         big ? 'py-3 min-h-[44px]' : 'py-2',
         active
           ? 'bg-luna-600/20 text-luna-100 border border-luna-500/30'
           : 'text-ink-300 hover:text-ink-50 hover:bg-white/5 border border-transparent',
+        ops && 'text-amber-300 border-amber-500/40',
+        ops && active && 'bg-amber-500/10',
       )}
       title={conv.title || 'Untitled'}
     >
-      {conv.title || 'New conversation'}
+      <span className="truncate">{conv.title || 'New conversation'}</span>
+      {ops && (
+        <span
+          data-testid="ops-tag"
+          className="ml-auto shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40"
+        >
+          OPS
+        </span>
+      )}
     </button>
   )
 }
@@ -3796,6 +4069,9 @@ export function renderTimeline(
   // 080: error-card Retry (disabled while a turn is streaming).
   onTurnErrorRetry?: (cardId: string) => void,
   turnErrorRetryDisabled?: boolean,
+  // 089: auto-approval ids whose receipts the wrench progress chip replaces
+  // (tagged live, per turn) — they never render as AutoToolReceipts rows.
+  suppressAutoIds?: Set<string>,
 ) {
   const ts = (s?: string | null) => (s ? Date.parse(s) : 0)
   const visible = messages.filter(
@@ -3926,6 +4202,9 @@ export function renderTimeline(
     // 028.1: an auto-approved receipt (owner never prompted) is not a card —
     // it becomes a compact tool chip, coalesced with its neighbours below.
     if (g.decided && isAutoApproved(g.decided)) {
+      // 089: this receipt happened during a live turn this tab painted — the
+      // wrench chip already accounts for it; no timeline row, then or later.
+      if (suppressAutoIds?.has(g.reqs[0].id)) return
       const tool = (g.reqs[0].payload as { tool?: string })?.tool
       items.push({
         ts: groupTs,
