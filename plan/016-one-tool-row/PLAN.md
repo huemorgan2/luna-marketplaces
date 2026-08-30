@@ -66,3 +66,5 @@ them); phase 1 ships core on its own since the UI can't be built without it.
   chip needs name + status only; args can be large and are already visible
   in the debug timeline.
 - Row height may grow (wrap) but never one row per call — coalescing stays.
+
+> **Changed by phase 2:** `liveAutoIdsRef` / `suppressAutoIds` are KEPT, not removed — with core 0.88.000 stamping `conversation_id` on `approval.decided` they work and are the "show a tool once live, hydrate receipts from approvals on reload" mechanism. Phase 4 (publish) folded into phase 3; shipped as plugin-chat-ui 0.21.0 (not 0.20.0 — the other session took 0.20.x meanwhile).
