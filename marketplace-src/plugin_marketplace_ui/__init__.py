@@ -16,7 +16,7 @@ from __future__ import annotations
 from luna_sdk import LunaPlugin, PluginContext, PluginManifest, SidebarSection
 
 
-def _pkg_version(default: str = "1.2.1") -> str:
+def _pkg_version(default: str = "1.2.2") -> str:
     """The version of record is `luna-plugin.toml` — that's what the
     marketplace publishes and what upgrades compare against. Read it here so
     the manifest can never drift from the package: a stale literal made every

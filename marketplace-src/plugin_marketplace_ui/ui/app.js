@@ -353,8 +353,9 @@ function actionUi(name, { compact } = {}) {
   } else if (le.upgrade && !le.upgrade.compatible) {
     h += `<span class="badge-disabled" title="${esc(le.upgrade.reason || 'incompatible update')}" data-testid="mp-upgrade-blocked-${esc(name)}">Update available</span>`;
   } else {
-    const iv = (le.installed_version && le.installed_version !== le.version)
-      ? `<span class="plugin-installed-version" data-testid="mp-installed-version-${esc(name)}">v${esc(le.installed_version)}</span>` : '';
+    const ver = le.installed_version || le.version;
+    const iv = ver
+      ? `<span class="plugin-installed-version" data-testid="mp-installed-version-${esc(name)}">v${esc(ver)}</span>` : '';
     h += `<span class="installed" data-testid="mp-installed-${esc(name)}">${ICON_CHECK}Installed${iv}</span>`;
   }
   // Settings deep-link into the Luna shell (same origin — navigate the top frame).
