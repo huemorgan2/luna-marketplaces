@@ -3,7 +3,7 @@
  * plugin route; it never enters a message, SSE frame, or the model context.
  */
 
-import { useState } from 'react'
+import { useState, type CSSProperties } from 'react'
 import { KeyRound, CheckCircle2, XCircle, Loader2, ShieldCheck } from 'lucide-react'
 import { cn } from '@luna/lib/cn'
 import { api, type SecretRequestSummary } from '@luna/lib/api'
@@ -91,12 +91,25 @@ export function InlineSecretForm({
         className="flex items-center gap-2"
       >
         <input
-          type="password"
+          // type="text" + CSS masking (not type="password"): password managers
+          // autofill password fields with saved credentials without firing
+          // onChange, leaving the box visually full of dots while `value` is
+          // still empty. Masking via text-security keeps the dots for typed
+          // input only.
+          type="text"
           autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          data-lpignore="true"
+          data-1p-ignore="true"
+          data-bwignore="true"
+          data-form-type="other"
           value={value}
           onChange={(e) => setValue(e.target.value)}
           placeholder="Paste the secret value…"
           data-testid="secret-form-input"
+          style={value ? { WebkitTextSecurity: 'disc' } as CSSProperties : undefined}
           className="flex-1 rounded-lg bg-ink-900/80 border border-white/10 px-3 py-1.5 text-sm text-ink-100 placeholder-ink-500 outline-none focus:border-amber-500/50"
         />
         <button
