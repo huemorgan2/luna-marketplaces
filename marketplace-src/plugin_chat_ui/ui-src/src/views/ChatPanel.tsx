@@ -3997,6 +3997,15 @@ function ChatHeader({
   const [ctxState, setCtxState] = useState<'idle' | 'busy' | 'copied'>('idle')
   const inputRef = useRef<HTMLInputElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+
+  // Escape closes the delete confirmation.
+  useEffect(() => {
+    if (!confirmDelete) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setConfirmDelete(false) }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [confirmDelete])
 
   useEffect(() => {
     if (renaming) inputRef.current?.focus()
@@ -4024,7 +4033,7 @@ function ChatHeader({
 
   async function doDelete() {
     if (!activeId) return
-    if (!confirm('Delete this conversation?')) return
+    setConfirmDelete(false)
     await api.deleteConversation(activeId)
     onDeleted()
   }
@@ -4188,7 +4197,7 @@ function ChatHeader({
                       the DELETE) — no dead affordance, the item is absent. */}
                   {!activeOps && (
                     <button
-                      onClick={() => { setMenuOpen(false); doDelete() }}
+                      onClick={() => { setMenuOpen(false); setConfirmDelete(true) }}
                       className="w-full flex items-center gap-2 px-3 py-2 text-sm text-rose-400 hover:bg-white/10"
                       data-testid="chat-header-delete"
                     >
@@ -4201,6 +4210,61 @@ function ChatHeader({
           </div>
         )
       )}
+      {confirmDelete && (
+        <DeleteConversationDialog
+          title={activeTitle}
+          onCancel={() => setConfirmDelete(false)}
+          onConfirm={doDelete}
+        />
+      )}
+    </div>
+  )
+}
+
+function DeleteConversationDialog({
+  title,
+  onCancel,
+  onConfirm,
+}: {
+  title: string | null
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  const name = (title || '').trim() || 'New conversation'
+  return (
+    <div
+      className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 p-4"
+      onMouseDown={onCancel}
+      data-testid="delete-conversation-confirm"
+    >
+      <div
+        className="max-w-sm w-full rounded-2xl border border-white/10 bg-ink-900 p-5 shadow-2xl"
+        onMouseDown={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+      >
+        <h3 className="text-base font-semibold text-ink-100 break-words">
+          Delete &ldquo;{name}&rdquo;?
+        </h3>
+        <p className="mt-1 text-sm text-ink-400">This can&rsquo;t be undone.</p>
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            className="px-4 py-2 rounded-lg text-sm text-ink-200 border border-white/10 hover:bg-white/5 transition"
+            data-testid="delete-conversation-cancel"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            autoFocus
+            className="px-4 py-2 rounded-lg text-sm text-white bg-rose-600 hover:bg-rose-500 transition"
+            data-testid="delete-conversation-yes"
+          >
+            Delete
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
