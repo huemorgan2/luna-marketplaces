@@ -389,7 +389,6 @@ const draftKey = (id: string | null) => `luna.draft.${id ?? 'new'}`
 // chat's composer or timeline (chat-switch isolation).
 interface TurnUI {
   streaming: boolean
-  toolNames: string[]
   subagent: { label: string; text: string; status: 'running' | 'done' | 'aborted' } | null
   waitLine: { until: number; reason: string; resuming: boolean } | null
   stopStage: 0 | 1 | 2
@@ -397,7 +396,6 @@ interface TurnUI {
 }
 const EMPTY_TURN: TurnUI = {
   streaming: false,
-  toolNames: [],
   subagent: null,
   waitLine: null,
   stopStage: 0,
@@ -410,12 +408,15 @@ const NO_MESSAGES: UIMessage[] = []
 // them and every helper defaults to a plain building conversation.
 type ConvRow = ConversationSummary & ConvMeta
 
-// 089: one tool call as tracked by the wrench progress chip. Lives OUTSIDE
-// TurnUI on purpose: TurnUI.toolNames is wiped when the stream closes, while
-// the chip's final "🔧 n tools" summary must survive the turn.
+// 016: one tool invocation as painted by the ToolRow, keyed by the server's
+// call_id (tool.called → tool.completed pair). Lives OUTSIDE TurnUI on
+// purpose: TurnUI is wiped when the stream closes, while the row stays as
+// the turn's grey receipt until the next turn starts.
 interface ToolLogEntry {
+  id: string
   name: string
   status: 'running' | 'done' | 'error'
+  error?: string
 }
 const NO_TOOL_LOG: ToolLogEntry[] = []
 
@@ -545,25 +546,26 @@ export function ChatPanel({
     const key = convId ?? ''
     setToolLog((prev) => (prev[key]?.length ? { ...prev, [key]: [] } : prev))
   }, [])
-  const logToolCalls = useCallback((convId: string | null, names: string[]) => {
-    if (!names.length) return
+  // 016: the row is fed by the server's tool.called / tool.completed frames
+  // (ui_event), one entry per call_id — main-loop and subagent tools alike.
+  const logToolCalled = useCallback((convId: string | null, id: string, name: string) => {
     const key = convId ?? ''
-    setToolLog((prev) => ({
-      ...prev,
-      [key]: [...(prev[key] ?? []), ...names.map((name) => ({ name, status: 'running' as const }))],
-    }))
+    setToolLog((prev) => {
+      const cur = prev[key] ?? []
+      if (cur.some((e) => e.id === id)) return prev
+      return { ...prev, [key]: [...cur, { id, name, status: 'running' as const }] }
+    })
   }, [])
-  const logToolResult = useCallback((convId: string | null, name: string, result: string) => {
+  const logToolCompleted = useCallback((convId: string | null, id: string, status: string, error?: string) => {
     const key = convId ?? ''
-    // Heuristic error accent: tool errors come back as prose, not a flag.
-    const errored = /^\s*(error|⚠|❌|traceback)/i.test(result || '')
+    const ok = status === 'ok' || status === 'skipped'
     setToolLog((prev) => {
       const cur = prev[key]
       if (!cur?.length) return prev
-      const idx = cur.findIndex((e) => e.status === 'running' && e.name === name)
+      const idx = cur.findIndex((e) => e.id === id)
       if (idx < 0) return prev
       const next = [...cur]
-      next[idx] = { ...next[idx], status: errored ? 'error' : 'done' }
+      next[idx] = { ...next[idx], status: ok ? 'done' : 'error', error: ok ? undefined : error }
       return { ...prev, [key]: next }
     })
   }, [])
@@ -581,7 +583,6 @@ export function ChatPanel({
   const turn = turns[activeId ?? ''] ?? EMPTY_TURN
   const streaming = turn.streaming
   const stopStage = turn.stopStage
-  const toolNames = turn.toolNames
   const subagent = turn.subagent
   const waitLine = turn.waitLine
   const condensing = turn.condensing
@@ -774,6 +775,22 @@ export function ChatPanel({
   // (each carries the FULL current plan); everything else flows up to Shell
   // (e.g. ui.navigate).
   const handleUiEvent = useCallback((convId: string | null, evt: { type: string; [key: string]: any }) => {
+    // 016: tool frames → the ToolRow (one chip per call_id).
+    if (evt.type === 'tool.called') {
+      if (evt.call_id && evt.name) logToolCalled(convId, String(evt.call_id), String(evt.name))
+      return
+    }
+    if (evt.type === 'tool.completed') {
+      if (evt.call_id) {
+        logToolCompleted(
+          convId,
+          String(evt.call_id),
+          String(evt.status ?? 'ok'),
+          (evt.error as string | undefined) ?? (evt.reason as string | undefined),
+        )
+      }
+      return
+    }
     // 049/phase02: subagent lifecycle → the one shimmer line. Never a log.
     // 012: scoped to the stream's conversation.
     if (evt.type === 'subagent.started') {
@@ -834,7 +851,7 @@ export function ChatPanel({
       return
     }
     onUiEvent?.(evt)
-  }, [onUiEvent, clearPlanResuming, patchTurn])
+  }, [onUiEvent, clearPlanResuming, patchTurn, logToolCalled, logToolCompleted])
 
   // 038/phase04: a running turn in this tab is visible work — stop showing
   // "Resuming…" the moment it starts.
@@ -1055,8 +1072,6 @@ export function ChatPanel({
       onReasoning: (r) => queueReasoning(currentMsgId, r.text, r.ms),
       // 089: a continuation is the same logical turn — its tool calls keep
       // counting on the same chip (no reset here).
-      onToolCall: (names) => logToolCalls(convId, names),
-      onToolResult: (name, result) => logToolResult(convId, name, result),
       onNewMessage: (id) => {
         currentMsgId = id
         setConvMessages(convId, (m) => [
@@ -1170,11 +1185,6 @@ export function ChatPanel({
       await attachTurnStream(convId, {
         onDelta: (delta) => queueDelta(convId, currentMsgId, delta),
         onReasoning: (r) => queueReasoning(currentMsgId, r.text, r.ms),
-        onToolCall: (names) => {
-          patchTurn(convId, (t) => ({ toolNames: [...t.toolNames, ...names] }))
-          logToolCalls(convId, names)
-        },
-        onToolResult: (name, result) => logToolResult(convId, name, result),
         onNewMessage: (id) => {
           currentMsgId = id
           setConvMessages(convId, (m) => [
@@ -1226,7 +1236,7 @@ export function ChatPanel({
         attachCtrlRef.current = null
       }
       setConvStreaming(convId, false)
-      patchTurn(convId, { toolNames: [], waitLine: null, condensing: false })
+      patchTurn(convId, { waitLine: null, condensing: false })
       settleToolLog(convId)
       if (needsCont) {
         setTimeout(() => triggerContinuation(convId), 400)
@@ -1560,13 +1570,12 @@ export function ChatPanel({
     // 012: onboarding streams before any conversation exists — it lives under
     // the '' key until the server-created conversation is selected below.
     setConvStreaming(null, true)
-    patchTurn(null, { toolNames: [], subagent: null })
+    patchTurn(null, { subagent: null })
     const assistantMsg: UIMessage = { id: `local-a-${Date.now()}`, role: 'assistant', content: '', pending: true }
     setConvMessages(null, [assistantMsg])
     try {
       await startOnboardingStream({
         onDelta: (delta) => queueDelta(null, assistantMsg.id, delta),
-        onToolCall: (names) => patchTurn(null, (t) => ({ toolNames: [...t.toolNames, ...names] })),
         onDone: () => {
           flushDeltasNow()
           setConvMessages(null, (m) => m.map((x) => (x.id === assistantMsg.id ? { ...x, pending: false } : x)))
@@ -1575,7 +1584,6 @@ export function ChatPanel({
     } finally {
       flushDeltasNow()
       setConvStreaming(null, false)
-      patchTurn(null, { toolNames: [] })
       const c = await refreshConversations()
       // The onboarding turn persisted its rows server-side — select the
       // conversation properly so its timeline loads under its own key.
@@ -2018,7 +2026,7 @@ export function ChatPanel({
     }
 
     setConvStreaming(convId, true)
-    patchTurn(convId, { toolNames: [], subagent: null })
+    patchTurn(convId, { subagent: null })
     // 089: a NEW user turn starts a fresh tool count; the previous turn's
     // collapsed "🔧 n tools" receipt lived until exactly this moment.
     resetToolLog(convId)
@@ -2051,12 +2059,7 @@ export function ChatPanel({
       await sendMessageStream(convId, text, {
         onDelta: (delta) => queueDelta(convId, currentMsgId, delta),
         onReasoning: (r) => queueReasoning(currentMsgId, r.text, r.ms),
-        onToolCall: (names) => {
-          patchTurn(convId, (t) => ({ toolNames: [...t.toolNames, ...names] }))
-          logToolCalls(convId, names)
-        },
-        onToolResult: (name, result, embed) => {
-          logToolResult(convId, name, result)
+        onToolResult: (_name, _result, embed) => {
           if (embed?.embed_iframe || embed?.embed_html) {
             const targetId = currentMsgId
             setConvMessages(convId, (m) => {
@@ -2208,7 +2211,7 @@ export function ChatPanel({
       sendBusyConvsRef.current.delete(busyKey)
       setConvStreaming(convId, false)
       // 073: a stream that died mid-condense must not leave the composer locked.
-      patchTurn(convId, { stopStage: 0, toolNames: [], condensing: false, waitLine: null })
+      patchTurn(convId, { stopStage: 0, condensing: false, waitLine: null })
       // 089: turn over — freeze any still-spinning chip entries (the log
       // itself survives, collapsed to "🔧 n tools", until the next turn).
       settleToolLog(convId)
@@ -2231,7 +2234,7 @@ export function ChatPanel({
 
   // 045/phase05: stable callbacks + a memoized timeline. renderTimeline used
   // to run inline in JSX, so EVERY state change (composer keystrokes,
-  // toolNames, stop stage) re-interleaved and re-rendered the whole timeline.
+  // tool row, stop stage) re-interleaved and re-rendered the whole timeline.
   const onSecretResolvedCb = useCallback((id: string, status: 'fulfilled' | 'cancelled') => {
     setSecretReqs((prev) =>
       prev.map((r) =>
@@ -2418,15 +2421,11 @@ export function ChatPanel({
           )}
           <div className={cn(dense ? 'space-y-3' : 'max-w-3xl mx-auto space-y-5')}>
             {timeline}
-            {/* 089: ONE fixed-height wrench chip carries all in-turn tool
-                activity (count + spinner; click = detail panel). It replaces
-                the per-call receipt rows, so the timeline's height stays
-                constant while tools run. After the turn it settles to the
-                final "🔧 n tools" count until the next turn starts. */}
-            <ToolProgressChip
-              entries={toolLog[activeId ?? ''] ?? NO_TOOL_LOG}
-              streaming={streaming}
-            />
+            {/* 016: THE in-turn tool surface — one wrap-row of chips, one per
+                call, shimmering while the tool runs and settling to grey
+                (rose on error). Stays as the turn's receipt until the next
+                turn starts. */}
+            <ToolRow entries={toolLog[activeId ?? ''] ?? NO_TOOL_LOG} />
             {/* 049/phase02: the ONE subagent status line — shimmer while
                 running, settles to a muted summary, never becomes a log. */}
             {/* 073: blocking condense — one shimmer line while the pass runs. */}
@@ -2526,7 +2525,6 @@ export function ChatPanel({
             condensing={condensing}
             stopStage={stopStage}
             onStop={handleStop}
-            toolNames={toolNames}
             offline={offline}
             contextStatus={contextStatus}
             staged={staged}
@@ -3045,104 +3043,76 @@ function StagedChip({ item, onRemove }: { item: StagedAttachment; onRemove: () =
  *  (repeat calls get a ×N count) with the name on hover — many tools fit
  *  without truncation. The spinner never shrinks (shrink-0): as a bare flex
  *  child it was the first thing squeezed to micro size by long name lists. */
-// 089: the ONE in-turn tool surface in the timeline. A single fixed-height
-// chip (spinner + 🔧 + running count) whose DOM height never changes while
-// tools run — no per-call rows, no layout jumps. Click toggles a bounded,
-// scrollable detail panel listing every call and its status. When the turn
-// ends the chip settles to "🔧 n tools" (rose accent if any call errored)
-// and stays as the turn's receipt until the next turn starts.
-function ToolProgressChip({ entries, streaming }: { entries: ToolLogEntry[]; streaming: boolean }) {
-  const [open, setOpen] = useState(false)
-  // A fresh turn (log reset) starts collapsed again.
-  useEffect(() => {
-    if (entries.length === 0) setOpen(false)
-  }, [entries.length === 0]) // eslint-disable-line react-hooks/exhaustive-deps
+// 016: the one tool row. Consecutive calls of the same tool cluster into one
+// chip with "#2 #3" tags (same shape as the history receipts), so a turn
+// that fires 15 auto tools stays one compact line. A chip shimmers while
+// any call in its cluster is still running, then settles to grey; an error
+// turns it rose and the message rides on the title.
+function ToolRow({ entries }: { entries: ToolLogEntry[] }) {
   if (entries.length === 0) return null
-  const anyError = entries.some((e) => e.status === 'error')
-  const runningEntry = streaming ? [...entries].reverse().find((e) => e.status === 'running') : undefined
+  const clusters: { name: string; calls: ToolLogEntry[] }[] = []
+  for (const e of entries) {
+    const last = clusters[clusters.length - 1]
+    if (last && last.name === e.name) last.calls.push(e)
+    else clusters.push({ name: e.name, calls: [e] })
+  }
   return (
-    <div className="px-1">
-      <button
-        type="button"
-        data-testid="tool-progress-chip"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-        className={cn(
-          'inline-flex h-7 max-w-full items-center gap-1.5 rounded-full border bg-transparent px-2.5 text-[11px] leading-none transition hover:bg-white/[0.04]',
-          anyError
-            ? 'border-rose-500/40 text-rose-300'
-            : streaming
-              ? 'border-luna-500/40 text-luna-300'
-              : 'border-white/10 text-ink-400',
-        )}
-        title={streaming ? 'Tools running — click for details' : 'Tools used this turn — click for details'}
-      >
-        {streaming && <Loader2 className="w-3 h-3 shrink-0 animate-spin" />}
-        <span aria-hidden>🔧</span>
-        <span data-testid="tool-progress-count">
-          {streaming ? entries.length : `${entries.length} tool${entries.length === 1 ? '' : 's'}`}
-        </span>
-        {runningEntry && (
-          <span className="truncate max-w-[16rem] text-ink-400">{runningEntry.name}</span>
-        )}
-        <ChevronDown className={cn('w-3 h-3 shrink-0 transition-transform', open && 'rotate-180')} />
-      </button>
-      {open && (
-        <div
-          data-testid="tool-progress-panel"
-          className="mt-1 max-h-44 max-w-md overflow-y-auto rounded-lg border border-white/10 bg-ink-900/80 px-2.5 py-1.5 text-[11px]"
-        >
-          {entries.map((e, i) => (
-            <div key={i} className="flex items-center gap-1.5 leading-5 min-w-0">
-              {e.status === 'running' ? (
-                <Loader2 className="w-3 h-3 shrink-0 animate-spin text-luna-300" />
-              ) : e.status === 'error' ? (
-                <X className="w-3 h-3 shrink-0 text-rose-400" />
-              ) : (
-                <Check className="w-3 h-3 shrink-0 text-emerald-400" />
-              )}
-              <span className={cn('truncate', e.status === 'error' ? 'text-rose-300' : 'text-ink-300')}>
-                {e.name}
+    <div
+      data-testid="tool-row"
+      className="flex flex-wrap items-center gap-x-3 gap-y-1 pl-11 text-[11px] leading-5 fade-in"
+    >
+      {clusters.map((cl) => {
+        const status = cl.calls.some((c) => c.status === 'running')
+          ? 'running'
+          : cl.calls.some((c) => c.status === 'error')
+            ? 'error'
+            : 'done'
+        const err = cl.calls.find((c) => c.status === 'error')?.error
+        return (
+          <span
+            key={cl.calls[0].id}
+            data-testid="tool-chip"
+            data-status={status}
+            title={status === 'error' && err ? `${cl.name}: ${err}` : cl.name}
+            className={cn(
+              'inline-flex items-center gap-1',
+              status === 'done' && 'text-ink-500',
+              status === 'error' && 'text-rose-400/90',
+            )}
+          >
+            <Wrench className={cn('h-3 w-3 shrink-0', status === 'running' && 'text-luna-300')} />
+            <span className={cn(status === 'running' && 'shimmer-text')}>{humanizeTool(cl.name)}</span>
+            {cl.calls.slice(1).map((c, i) => (
+              <span
+                key={c.id}
+                className={cn(
+                  c.status === 'running' ? 'shimmer-text' : c.status === 'error' ? 'text-rose-400/90' : 'text-ink-600',
+                )}
+              >
+                #{i + 2}
               </span>
-            </div>
-          ))}
-        </div>
-      )}
+            ))}
+          </span>
+        )
+      })}
     </div>
   )
 }
 
-function WorkingTools({ toolNames }: { toolNames: string[] }) {
-  const compact = toolNames.length > 3 || toolNames.join(', ').length > 34
-  const counts = new Map<string, number>()
-  for (const n of toolNames) counts.set(n, (counts.get(n) ?? 0) + 1)
+// 016: the composer only says "working…" — the tool names live in the
+// timeline's ToolRow now, never here.
+function WorkingLine() {
   return (
-    <>
+    <span data-testid="working-line" className="inline-flex items-center gap-2">
       <Loader2 className="w-3 h-3 shrink-0 animate-spin text-luna-300" />
       <span className="text-luna-300 shrink-0">working…</span>
-      {compact ? (
-        <div className="flex items-center gap-1 min-w-0 overflow-hidden" data-testid="working-tool-chips">
-          {[...counts.entries()].map(([name, n]) => (
-            <span
-              key={name}
-              title={n > 1 ? `${name} ×${n}` : name}
-              className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded-md bg-white/[0.06] text-luna-300 shrink-0"
-            >
-              <Wrench className="w-3 h-3" />
-              {n > 1 && <span className="text-[10px] leading-none">{n}</span>}
-            </span>
-          ))}
-        </div>
-      ) : (
-        <span className="text-luna-300 truncate">{toolNames.join(', ')}</span>
-      )}
-    </>
+    </span>
   )
 }
 
 function Composer({
   value, onChange, onSubmit, streaming, condensing = false, stopStage, onStop,
-  toolNames, offline, contextStatus, staged, onAttach, onRemoveStaged,
+  offline, contextStatus, staged, onAttach, onRemoveStaged,
   focusRef, banner, convKind = null, convState = null, onConvStateChange,
 }: {
   /** 013: alert tab docked onto the box's top edge (e.g. agent feedback). */
@@ -3155,7 +3125,6 @@ function Composer({
   condensing?: boolean
   stopStage: 0 | 1 | 2
   onStop: () => void
-  toolNames: string[]
   offline: boolean
   contextStatus?: ContextStatus | null
   staged: StagedAttachment[]
@@ -3266,8 +3235,8 @@ function Composer({
               <StatePickerMenu kind={convKind} value={convState} onChange={onConvStateChange} />
             )}
             <div className="flex-1 text-[11px] text-ink-500 flex items-center gap-2 min-w-0 pl-1">
-              {toolNames.length > 0 ? (
-                <WorkingTools toolNames={toolNames} />
+              {streaming ? (
+                <WorkingLine />
               ) : offline ? (
                 <span className="text-rose-400">offline — reconnecting…</span>
               ) : null}

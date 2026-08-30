@@ -13,6 +13,7 @@ type StreamCbs = {
   onDelta?: (d: string) => void
   onNewMessage?: (id: string) => void
   onToolCall?: (names: string[]) => void
+  onUiEvent?: (evt: { type: string; [key: string]: any }) => void
   onDone?: (text: string, meta?: Record<string, unknown>) => void
 }
 type GlobalHandlers = {
@@ -116,9 +117,12 @@ describe('012 conversation isolation', () => {
     const cbs = await startTurnInC1()
     await act(async () => {
       cbs.onToolCall?.(['browser.open', 'files.read', 'shell.run', 'web.search'])
+      // 016: the tool row is fed by server tool frames, scoped to the stream's conversation.
+      cbs.onUiEvent?.({ type: 'tool.called', call_id: 't1', name: 'files.read', status: 'pending', conversation_id: 'c1' })
     })
     // c1 on screen: live chrome is visible.
-    expect(screen.getByTestId('working-tool-chips')).toBeTruthy()
+    expect(screen.getByTestId('working-line')).toBeTruthy()
+    expect(screen.getByTestId('tool-row')).toBeTruthy()
     expect(screen.getByText('hello from c1')).toBeTruthy()
 
     await act(async () => {
@@ -127,7 +131,8 @@ describe('012 conversation isolation', () => {
     await waitFor(() => expect(h.createConversation).toHaveBeenCalled())
 
     // c2 on screen: NO leaked chrome, no leaked bubbles.
-    expect(screen.queryByTestId('working-tool-chips')).toBeNull()
+    expect(screen.queryByTestId('working-line')).toBeNull()
+    expect(screen.queryByTestId('tool-row')).toBeNull()
     expect(screen.queryByText('working…')).toBeNull()
     expect(screen.queryByText('hello from c1')).toBeNull()
   })
