@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 // 016 — the one ToolRow: server tool.called / tool.completed frames paint one
 // chip per call that shimmers while running and settles to grey (rose on
-// error). The composer only says "working…"; no wrench pill; live auto-
+// error). 017: the composer shows nothing; the live indicator (spinner +
+// elapsed, "still working" after 20 s of silence) ends the row; no wrench pill; live auto-
 // approval receipts are suppressed so a tool is shown once.
 import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest'
 import { render, screen, waitFor, act, cleanup } from '@testing-library/react'
@@ -127,7 +128,7 @@ const shimmering = (el: HTMLElement) => !!el.querySelector('.shimmer-text')
 describe('016 tool row', () => {
   it('a chip appears on tool.called and shimmers until tool.completed turns it grey', async () => {
     const { cbs } = await startTurn()
-    expect(screen.queryByTestId('tool-row')).toBeNull()
+    expect(chips()).toHaveLength(0) // 017: the row hosts the live indicator; no chips yet
     await act(async () => {
       cbs.onUiEvent?.(called('a1', 'files.read'))
     })
@@ -191,7 +192,8 @@ describe('016 tool row', () => {
       bridgeSend('again')
     })
     await waitFor(() => expect(h.sendMessageStream).toHaveBeenCalledTimes(2))
-    expect(screen.queryByTestId('tool-row')).toBeNull()
+    // 017: the row itself stays (it hosts the live indicator) — the chips are gone.
+    expect(chips()).toHaveLength(0)
   })
 
   it('a stream that closes mid-call settles the running chip instead of leaving a phantom shimmer', async () => {
@@ -204,15 +206,90 @@ describe('016 tool row', () => {
     await waitFor(() => expect(chips()[0].dataset.status).toBe('done'))
   })
 
-  it('the composer says only "working…" — no tool names', async () => {
+  it('017: the composer shows no words while streaming; the live indicator sits at the end of the row', async () => {
+    const { cbs, endTurn } = await startTurn()
+    expect(screen.queryByTestId('working-line')).toBeNull()
+    expect(screen.queryByText('working…')).toBeNull()
+    const live = screen.getByTestId('turn-live')
+    expect(live.getAttribute('data-stalled')).toBe('false')
+    expect(live.textContent).toMatch(/^\d+:\d\d$/)
+    // it lives inside the tool row, after the chips
+    await act(async () => { cbs.onUiEvent?.(called('f1', 'files.read')) })
+    const row = screen.getByTestId('tool-row')
+    expect(row.contains(screen.getByTestId('turn-live'))).toBe(true)
+    expect(row.querySelector('[data-testid="turn-live"]')!.compareDocumentPosition(chips()[0]) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
+    await act(async () => { endTurn() })
+    await waitFor(() => expect(screen.queryByTestId('turn-live')).toBeNull())
+  })
+
+  it('017: the hint from the frame is part of the chip label; tool.called upserts pending → awaiting → running', async () => {
     const { cbs } = await startTurn()
-    expect(screen.getByTestId('working-line').textContent).toContain('working…')
     await act(async () => {
-      cbs.onToolCall?.(['files.read'])
-      cbs.onUiEvent?.(called('f1', 'files.read'))
+      cbs.onUiEvent?.({ ...called('m1', 'monday_list_boards'), hint: 'Sales Q3' })
     })
-    expect(screen.getByTestId('working-line').textContent).not.toContain('files.read')
-    expect(screen.queryByTestId('working-tool-chips')).toBeNull()
+    expect(chips()).toHaveLength(1)
+    expect(chips()[0].getAttribute('data-status')).toBe('running')
+    expect(screen.getByTestId('tool-hint').textContent).toContain('Sales Q3')
+    await act(async () => {
+      cbs.onUiEvent?.({ ...called('m1', 'monday_list_boards'), status: 'awaiting_approval' })
+    })
+    expect(chips()).toHaveLength(1)
+    expect(chips()[0].getAttribute('data-status')).toBe('awaiting')
+    expect(chips()[0].textContent).toContain('waiting for approval')
+    expect(shimmering(chips()[0])).toBe(false)
+    await act(async () => {
+      cbs.onUiEvent?.({ ...called('m1', 'monday_list_boards'), status: 'running' })
+    })
+    expect(chips()[0].getAttribute('data-status')).toBe('running')
+    expect(shimmering(chips()[0])).toBe(true)
+    await act(async () => { cbs.onUiEvent?.(completed('m1', 'monday_list_boards')) })
+    expect(chips()[0].getAttribute('data-status')).toBe('done')
+    expect(screen.getByTestId('tool-hint').textContent).toContain('Sales Q3')
+  })
+
+  it('017: rejected and skipped calls get a grey tagged chip instead of vanishing', async () => {
+    const { cbs } = await startTurn()
+    await act(async () => {
+      cbs.onUiEvent?.(called('r1', 'delete_file'))
+      cbs.onUiEvent?.(completed('r1', 'delete_file', 'rejected', 'policy=block'))
+      cbs.onUiEvent?.(called('s1', 'set_value'))
+      cbs.onUiEvent?.(completed('s1', 'set_value', 'skipped', 'pre_gate_check'))
+    })
+    const [r, sk] = chips()
+    expect(r.getAttribute('data-status')).toBe('rejected')
+    expect(r.textContent).toContain('rejected')
+    expect(sk.getAttribute('data-status')).toBe('skipped')
+    expect(sk.textContent).toContain('skipped')
+  })
+
+  it('017/D2: clicking an error chip shows its error under the row', async () => {
+    const { cbs } = await startTurn()
+    await act(async () => {
+      cbs.onUiEvent?.(called('e1', 'monday_list_boards'))
+      cbs.onUiEvent?.(completed('e1', 'monday_list_boards', 'error', 'no credential for monday'))
+    })
+    expect(screen.queryByTestId('tool-error')).toBeNull()
+    await act(async () => { chips()[0].click() })
+    expect(screen.getByTestId('tool-error').textContent).toContain('no credential for monday')
+    await act(async () => { chips()[0].click() })
+    expect(screen.queryByTestId('tool-error')).toBeNull()
+  })
+
+  it('017/D3: after 20 s without a frame the indicator says "still working"; a delta resets it', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { cbs } = await startTurn()
+      await act(async () => { vi.advanceTimersByTime(21_000) })
+      const live = screen.getByTestId('turn-live')
+      expect(live.getAttribute('data-stalled')).toBe('true')
+      expect(live.textContent).toContain('still working')
+      await act(async () => { cbs.onDelta?.('hello') })
+      await act(async () => { vi.advanceTimersByTime(1_000) })
+      expect(screen.getByTestId('turn-live').getAttribute('data-stalled')).toBe('false')
+      expect(screen.getByTestId('turn-live').textContent).not.toContain('still working')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('an auto-approval decided during the live turn adds no receipt row (the chip already shows it)', async () => {

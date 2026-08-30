@@ -412,13 +412,21 @@ type ConvRow = ConversationSummary & ConvMeta
 // call_id (tool.called → tool.completed pair). Lives OUTSIDE TurnUI on
 // purpose: TurnUI is wiped when the stream closes, while the row stays as
 // the turn's grey receipt until the next turn starts.
+// 017: tool.called is an UPSERT by call_id — pending (wrapper entered) →
+// awaiting (approval prompt up) → running (handler started); tool.completed
+// settles it. `hint` is the server's one safe scalar from the arguments.
+type ToolLogStatus = 'pending' | 'running' | 'awaiting' | 'done' | 'skipped' | 'rejected' | 'error'
 interface ToolLogEntry {
   id: string
   name: string
-  status: 'running' | 'done' | 'error'
+  status: ToolLogStatus
+  hint?: string
   error?: string
 }
 const NO_TOOL_LOG: ToolLogEntry[] = []
+const LIVE_STATUSES: ReadonlySet<ToolLogStatus> = new Set(['pending', 'running', 'awaiting'])
+// 017/D3: silence threshold before the live indicator says "still working".
+const STILL_WORKING_MS = 20_000
 
 export function ChatPanel({
   identity,
@@ -532,10 +540,24 @@ export function ChatPanel({
   // Synchronous mirror of which conversations have a live stream owned or
   // watched by this tab (state is async; guards need the truth NOW).
   const streamingConvsRef = useRef<Set<string>>(new Set())
+  // 017: when the turn started and when the server last said anything —
+  // the end-of-row indicator reads these (elapsed + "still working").
+  const turnStartRef = useRef<Map<string, number>>(new Map())
+  const lastActivityRef = useRef<Map<string, number>>(new Map())
+  const noteActivity = useCallback((convId: string | null) => {
+    lastActivityRef.current.set(convId ?? '', Date.now())
+  }, [])
   const setConvStreaming = useCallback((convId: string | null, on: boolean) => {
     const key = convId ?? ''
-    if (on) streamingConvsRef.current.add(key)
-    else streamingConvsRef.current.delete(key)
+    if (on) {
+      streamingConvsRef.current.add(key)
+      if (!turnStartRef.current.has(key)) turnStartRef.current.set(key, Date.now())
+      lastActivityRef.current.set(key, Date.now())
+    } else {
+      streamingConvsRef.current.delete(key)
+      turnStartRef.current.delete(key)
+      lastActivityRef.current.delete(key)
+    }
     patchTurn(key, { streaming: on })
   }, [patchTurn])
   // 089: per-conversation tool log behind the wrench progress chip. Reset at
@@ -548,24 +570,31 @@ export function ChatPanel({
   }, [])
   // 016: the row is fed by the server's tool.called / tool.completed frames
   // (ui_event), one entry per call_id — main-loop and subagent tools alike.
-  const logToolCalled = useCallback((convId: string | null, id: string, name: string) => {
+  const logToolCalled = useCallback((convId: string | null, id: string, name: string, status?: string, hint?: string) => {
     const key = convId ?? ''
+    const st: ToolLogStatus = status === 'awaiting_approval' ? 'awaiting' : status === 'running' ? 'running' : 'pending'
     setToolLog((prev) => {
       const cur = prev[key] ?? []
-      if (cur.some((e) => e.id === id)) return prev
-      return { ...prev, [key]: [...cur, { id, name, status: 'running' as const }] }
+      const idx = cur.findIndex((e) => e.id === id)
+      if (idx < 0) return { ...prev, [key]: [...cur, { id, name, status: st, hint }] }
+      // 017: upsert — a settled chip never goes live again.
+      if (!LIVE_STATUSES.has(cur[idx].status)) return prev
+      const next = [...cur]
+      next[idx] = { ...next[idx], status: st, hint: next[idx].hint ?? hint }
+      return { ...prev, [key]: next }
     })
   }, [])
   const logToolCompleted = useCallback((convId: string | null, id: string, status: string, error?: string) => {
     const key = convId ?? ''
-    const ok = status === 'ok' || status === 'skipped'
+    const st: ToolLogStatus =
+      status === 'ok' ? 'done' : status === 'skipped' ? 'skipped' : status === 'rejected' ? 'rejected' : 'error'
     setToolLog((prev) => {
       const cur = prev[key]
       if (!cur?.length) return prev
       const idx = cur.findIndex((e) => e.id === id)
       if (idx < 0) return prev
       const next = [...cur]
-      next[idx] = { ...next[idx], status: ok ? 'done' : 'error', error: ok ? undefined : error }
+      next[idx] = { ...next[idx], status: st, error: st === 'error' ? error : undefined }
       return { ...prev, [key]: next }
     })
   }, [])
@@ -574,8 +603,8 @@ export function ChatPanel({
     const key = convId ?? ''
     setToolLog((prev) => {
       const cur = prev[key]
-      if (!cur?.some((e) => e.status === 'running')) return prev
-      return { ...prev, [key]: cur.map((e) => (e.status === 'running' ? { ...e, status: 'done' as const } : e)) }
+      if (!cur?.some((e) => LIVE_STATUSES.has(e.status))) return prev
+      return { ...prev, [key]: cur.map((e) => (LIVE_STATUSES.has(e.status) ? { ...e, status: 'done' as const } : e)) }
     })
   }, [])
   // The active conversation's live-turn view — same names the render code and
@@ -775,9 +804,18 @@ export function ChatPanel({
   // (each carries the FULL current plan); everything else flows up to Shell
   // (e.g. ui.navigate).
   const handleUiEvent = useCallback((convId: string | null, evt: { type: string; [key: string]: any }) => {
+    noteActivity(convId) // 017: any server frame is a sign of life
     // 016: tool frames → the ToolRow (one chip per call_id).
     if (evt.type === 'tool.called') {
-      if (evt.call_id && evt.name) logToolCalled(convId, String(evt.call_id), String(evt.name))
+      if (evt.call_id && evt.name) {
+        logToolCalled(
+          convId,
+          String(evt.call_id),
+          String(evt.name),
+          evt.status ? String(evt.status) : undefined,
+          typeof evt.hint === 'string' && evt.hint ? evt.hint : undefined,
+        )
+      }
       return
     }
     if (evt.type === 'tool.completed') {
@@ -851,7 +889,7 @@ export function ChatPanel({
       return
     }
     onUiEvent?.(evt)
-  }, [onUiEvent, clearPlanResuming, patchTurn, logToolCalled, logToolCompleted])
+  }, [onUiEvent, clearPlanResuming, patchTurn, logToolCalled, logToolCompleted, noteActivity])
 
   // 038/phase04: a running turn in this tab is visible work — stop showing
   // "Resuming…" the moment it starts.
@@ -954,6 +992,7 @@ export function ChatPanel({
   }, [mapAllConvMessages])
   const queueDelta = useCallback((convId: string | null, id: string, delta: string) => {
     clearWaitLine(convId) // 069: visible stream activity ends the wait line
+    noteActivity(convId)
     deltaBufRef.current.set(id, (deltaBufRef.current.get(id) ?? '') + delta)
     if (deltaRafRef.current === null) {
       deltaRafRef.current = requestAnimationFrame(() => {
@@ -989,6 +1028,7 @@ export function ChatPanel({
     )
   }, [mapAllConvMessages])
   const queueReasoning = useCallback((id: string, text: string, ms?: number) => {
+    noteActivity(activeIdRef.current ?? null)
     const prev = reasoningBufRef.current.get(id)
     reasoningBufRef.current.set(id, {
       text: (prev?.text ?? '') + text,
@@ -2425,7 +2465,13 @@ export function ChatPanel({
                 call, shimmering while the tool runs and settling to grey
                 (rose on error). Stays as the turn's receipt until the next
                 turn starts. */}
-            <ToolRow entries={toolLog[activeId ?? ''] ?? NO_TOOL_LOG} />
+            <ToolRow
+              entries={toolLog[activeId ?? ''] ?? NO_TOOL_LOG}
+              live={streaming}
+              convKey={activeId ?? ''}
+              turnStartRef={turnStartRef}
+              lastActivityRef={lastActivityRef}
+            />
             {/* 049/phase02: the ONE subagent status line — shimmer while
                 running, settles to a muted summary, never becomes a log. */}
             {/* 073: blocking condense — one shimmer line while the pass runs. */}
@@ -3048,64 +3094,126 @@ function StagedChip({ item, onRemove }: { item: StagedAttachment; onRemove: () =
 // that fires 15 auto tools stays one compact line. A chip shimmers while
 // any call in its cluster is still running, then settles to grey; an error
 // turns it rose and the message rides on the title.
-function ToolRow({ entries }: { entries: ToolLogEntry[] }) {
-  if (entries.length === 0) return null
+function ToolRow({
+  entries, live, convKey, turnStartRef, lastActivityRef,
+}: {
+  entries: ToolLogEntry[]
+  live: boolean
+  convKey: string
+  turnStartRef: React.MutableRefObject<Map<string, number>>
+  lastActivityRef: React.MutableRefObject<Map<string, number>>
+}) {
+  // 017/D2: which error chip is expanded (its message shows under the row).
+  const [openErr, setOpenErr] = useState<string | null>(null)
+  if (entries.length === 0 && !live) return null
   const clusters: { name: string; calls: ToolLogEntry[] }[] = []
   for (const e of entries) {
     const last = clusters[clusters.length - 1]
     if (last && last.name === e.name) last.calls.push(e)
     else clusters.push({ name: e.name, calls: [e] })
   }
+  const openEntry = openErr ? entries.find((e) => e.id === openErr && e.status === 'error') : undefined
   return (
-    <div
-      data-testid="tool-row"
-      className="flex flex-wrap items-center gap-x-3 gap-y-1 pl-11 text-[11px] leading-5 fade-in"
-    >
-      {clusters.map((cl) => {
-        const status = cl.calls.some((c) => c.status === 'running')
-          ? 'running'
-          : cl.calls.some((c) => c.status === 'error')
-            ? 'error'
-            : 'done'
-        const err = cl.calls.find((c) => c.status === 'error')?.error
-        return (
-          <span
-            key={cl.calls[0].id}
-            data-testid="tool-chip"
-            data-status={status}
-            title={status === 'error' && err ? `${cl.name}: ${err}` : cl.name}
-            className={cn(
-              'inline-flex items-center gap-1',
-              status === 'done' && 'text-ink-500',
-              status === 'error' && 'text-rose-400/90',
-            )}
-          >
-            <Wrench className={cn('h-3 w-3 shrink-0', status === 'running' && 'text-luna-300')} />
-            <span className={cn(status === 'running' && 'shimmer-text')}>{humanizeTool(cl.name)}</span>
-            {cl.calls.slice(1).map((c, i) => (
-              <span
-                key={c.id}
-                className={cn(
-                  c.status === 'running' ? 'shimmer-text' : c.status === 'error' ? 'text-rose-400/90' : 'text-ink-600',
-                )}
-              >
-                #{i + 2}
-              </span>
-            ))}
-          </span>
-        )
-      })}
+    <div data-testid="tool-row" className="pl-11 text-[11px] leading-5 fade-in">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        {clusters.map((cl) => {
+          const head = cl.calls[0]
+          const status: ToolLogStatus = cl.calls.some((c) => c.status === 'running' || c.status === 'pending')
+            ? 'running'
+            : cl.calls.some((c) => c.status === 'awaiting')
+              ? 'awaiting'
+              : cl.calls.some((c) => c.status === 'error')
+                ? 'error'
+                : cl.calls.every((c) => c.status === 'rejected')
+                  ? 'rejected'
+                  : cl.calls.every((c) => c.status === 'skipped')
+                    ? 'skipped'
+                    : 'done'
+          const errCall = cl.calls.find((c) => c.status === 'error')
+          const hint = head.hint
+          const tag =
+            status === 'awaiting' ? 'waiting for approval' : status === 'rejected' ? 'rejected' : status === 'skipped' ? 'skipped' : null
+          const shimmer = status === 'running'
+          return (
+            <span
+              key={head.id}
+              data-testid="tool-chip"
+              data-status={status}
+              title={status === 'error' && errCall?.error ? `${cl.name}: ${errCall.error}` : cl.name}
+              onClick={errCall ? () => setOpenErr((cur) => (cur === errCall.id ? null : errCall.id)) : undefined}
+              className={cn(
+                'inline-flex items-center gap-1',
+                (status === 'done' || status === 'rejected' || status === 'skipped') && 'text-ink-500',
+                status === 'error' && 'text-rose-400/90 cursor-pointer',
+                status === 'awaiting' && 'text-amber-300/90',
+              )}
+            >
+              <Wrench className={cn('h-3 w-3 shrink-0', shimmer && 'text-luna-300')} />
+              <span className={cn(shimmer && 'shimmer-text')}>{humanizeTool(cl.name)}</span>
+              {hint && (
+                <span data-testid="tool-hint" className={cn('truncate max-w-[16rem]', shimmer ? 'shimmer-text' : 'opacity-70')}>
+                  · {hint}
+                </span>
+              )}
+              {tag && <span className="opacity-80">· {tag}</span>}
+              {cl.calls.slice(1).map((c, i) => (
+                <span
+                  key={c.id}
+                  className={cn(
+                    LIVE_STATUSES.has(c.status) ? 'shimmer-text' : c.status === 'error' ? 'text-rose-400/90' : 'text-ink-600',
+                  )}
+                >
+                  #{i + 2}
+                </span>
+              ))}
+            </span>
+          )
+        })}
+        {live && <TurnLive convKey={convKey} turnStartRef={turnStartRef} lastActivityRef={lastActivityRef} />}
+      </div>
+      {openEntry?.error && (
+        <div data-testid="tool-error" className="mt-1 text-rose-300/80 whitespace-pre-wrap break-words">
+          {openEntry.error}
+        </div>
+      )}
     </div>
   )
 }
 
-// 016: the composer only says "working…" — the tool names live in the
-// timeline's ToolRow now, never here.
-function WorkingLine() {
+function fmtElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  const m = Math.floor(s / 60)
+  return `${m}:${String(s % 60).padStart(2, '0')}`
+}
+
+// 017: THE live indicator — a spinner and the elapsed time at the end of the
+// tool row while the turn is alive. No words, unless the server has been
+// silent for STILL_WORKING_MS: then "still working" in amber (D3). Reads the
+// refs on a 1 s tick so deltas don't re-render it.
+function TurnLive({
+  convKey, turnStartRef, lastActivityRef,
+}: {
+  convKey: string
+  turnStartRef: React.MutableRefObject<Map<string, number>>
+  lastActivityRef: React.MutableRefObject<Map<string, number>>
+}) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(t)
+  }, [])
+  const started = turnStartRef.current.get(convKey) ?? now
+  const last = lastActivityRef.current.get(convKey) ?? started
+  const stalled = now - last >= STILL_WORKING_MS
   return (
-    <span data-testid="working-line" className="inline-flex items-center gap-2">
-      <Loader2 className="w-3 h-3 shrink-0 animate-spin text-luna-300" />
-      <span className="text-luna-300 shrink-0">working…</span>
+    <span
+      data-testid="turn-live"
+      data-stalled={stalled ? 'true' : 'false'}
+      className={cn('inline-flex items-center gap-1.5 tabular-nums', stalled ? 'text-amber-300/90' : 'text-ink-500')}
+    >
+      <Loader2 className={cn('w-3 h-3 shrink-0 animate-spin', stalled ? 'text-amber-300' : 'text-luna-300')} />
+      {stalled && <span>still working ·</span>}
+      <span>{fmtElapsed(now - started)}</span>
     </span>
   )
 }
@@ -3235,9 +3343,9 @@ function Composer({
               <StatePickerMenu kind={convKind} value={convState} onChange={onConvStateChange} />
             )}
             <div className="flex-1 text-[11px] text-ink-500 flex items-center gap-2 min-w-0 pl-1">
-              {streaming ? (
-                <WorkingLine />
-              ) : offline ? (
+              {/* 017: nothing while streaming — the live indicator sits at
+                  the end of the ToolRow under the message. */}
+              {!streaming && offline ? (
                 <span className="text-rose-400">offline — reconnecting…</span>
               ) : null}
             </div>

@@ -121,7 +121,7 @@ describe('012 conversation isolation', () => {
       cbs.onUiEvent?.({ type: 'tool.called', call_id: 't1', name: 'files.read', status: 'pending', conversation_id: 'c1' })
     })
     // c1 on screen: live chrome is visible.
-    expect(screen.getByTestId('working-line')).toBeTruthy()
+    expect(screen.getByTestId('turn-live')).toBeTruthy()
     expect(screen.getByTestId('tool-row')).toBeTruthy()
     expect(screen.getByText('hello from c1')).toBeTruthy()
 
@@ -131,7 +131,7 @@ describe('012 conversation isolation', () => {
     await waitFor(() => expect(h.createConversation).toHaveBeenCalled())
 
     // c2 on screen: NO leaked chrome, no leaked bubbles.
-    expect(screen.queryByTestId('working-line')).toBeNull()
+    expect(screen.queryByTestId('turn-live')).toBeNull()
     expect(screen.queryByTestId('tool-row')).toBeNull()
     expect(screen.queryByText('working…')).toBeNull()
     expect(screen.queryByText('hello from c1')).toBeNull()
