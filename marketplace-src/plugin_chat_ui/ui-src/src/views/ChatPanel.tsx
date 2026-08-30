@@ -35,6 +35,7 @@ import { composerWidgets } from '../lib/composerWidgets'
 import { matchesFrustration, alertSuppressed, suppressAlert } from '../lib/chatAlerts'
 import {
   STATE_OPTIONS, DEFAULT_STATE, OPS_CAPABILITY, OPS_CAPABILITY_TOOLTIP,
+  OPS_AGENT_INTRO, OPS_STATE_DETAILS,
   convKind, convState, sortOpsFirst,
   patchConversationState, subscribeConvStateEvents,
   type ConversationKind, type ConvMeta,
@@ -3352,6 +3353,8 @@ function Composer({
 // 0.17.0 native <select>. Closed chip: hairline neutral border (amber TEXT in
 // ops); the amber/luna border shows only while the menu is open or the chip
 // is focused. Selection is the ONLY state-write trigger (never programmatic).
+const STATE_DETAILS_KEY = 'luna.chat.stateDetails'
+
 function StatePickerMenu({ kind, value, onChange }: {
   kind: ConversationKind
   value: string
@@ -3359,6 +3362,18 @@ function StatePickerMenu({ kind, value, onChange }: {
 }) {
   const [open, setOpen] = useState(false)
   const [focused, setFocused] = useState(false)
+  // 015 (ops only): "Details" expander — per-option can/won't bullets that
+  // say what THIS agent works on (Luna herself). Remembered per browser.
+  const [details, setDetails] = useState<boolean>(() => {
+    try { return localStorage.getItem(STATE_DETAILS_KEY) === '1' } catch { return false }
+  })
+  const toggleDetails = () => {
+    setDetails((v) => {
+      const next = !v
+      try { localStorage.setItem(STATE_DETAILS_KEY, next ? '1' : '0') } catch { /* unavailable */ }
+      return next
+    })
+  }
   const rootRef = useRef<HTMLDivElement | null>(null)
 
   // Same close behavior as the model picker: click-outside + Esc.
@@ -3416,9 +3431,26 @@ function StatePickerMenu({ kind, value, onChange }: {
             'shadow-2xl shadow-black/40 py-1.5',
           )}
         >
-          <div className="px-3.5 pt-2 pb-1.5 text-[11px] uppercase tracking-[0.16em] font-semibold text-ink-500 border-b border-white/5">
-            AGENT STATE
+          <div className="flex items-center px-3.5 pt-2 pb-1.5 text-[11px] uppercase tracking-[0.16em] font-semibold text-ink-500 border-b border-white/5">
+            <span>AGENT STATE</span>
+            {kind === 'ops' && (
+              <button
+                type="button"
+                data-testid="state-details-toggle"
+                aria-expanded={details}
+                onClick={(e) => { e.stopPropagation(); toggleDetails() }}
+                className="ml-auto inline-flex items-center gap-0.5 normal-case tracking-normal font-medium text-[11px] text-amber-300/80 hover:text-amber-200 outline-none focus-visible:underline"
+              >
+                Details
+                <ChevronDown className={cn('w-3 h-3 transition', details && 'rotate-180')} aria-hidden />
+              </button>
+            )}
           </div>
+          {kind === 'ops' && details && (
+            <div data-testid="state-details-intro" className="px-3.5 pt-2 pb-1 text-[10.5px] leading-snug text-ink-300">
+              {OPS_AGENT_INTRO}
+            </div>
+          )}
           <ul className="py-1">
             {options.map((o) => {
               const active = o.value === value
@@ -3455,6 +3487,13 @@ function StatePickerMenu({ kind, value, onChange }: {
                         {o.label}
                       </span>
                       <span className="block text-[10px] leading-snug text-ink-500 mt-0.5">{o.desc}</span>
+                      {kind === 'ops' && details && OPS_STATE_DETAILS[o.value] && (
+                        <OpsStateBullets
+                          detail={OPS_STATE_DETAILS[o.value]}
+                          testId={`state-details-${o.value}`}
+                          className="mt-1.5"
+                        />
+                      )}
                     </span>
                     {active && (
                       <Check
@@ -3480,6 +3519,8 @@ function StatePickerMenu({ kind, value, onChange }: {
 function OpsCapabilityLine({ state }: { state: string }) {
   const [tip, setTip] = useState(false)
   const text = OPS_CAPABILITY[state]
+  const current = STATE_OPTIONS.ops.find((o) => o.value === state)
+  const detail = OPS_STATE_DETAILS[state]
   if (!text) return null
   return (
     <span
@@ -3496,11 +3537,41 @@ function OpsCapabilityLine({ state }: { state: string }) {
         <span
           role="tooltip"
           data-testid="ops-capability-tooltip"
-          className="absolute bottom-full left-0 mb-1.5 z-50 block w-72 whitespace-normal rounded-lg border border-white/15 bg-ink-950 px-2.5 py-2 text-left text-[10px] leading-snug text-ink-200 shadow-xl"
+          className="absolute bottom-full left-0 mb-1.5 z-50 block w-80 whitespace-normal rounded-lg border border-white/15 bg-ink-950 px-2.5 py-2 text-left text-[10px] leading-snug text-ink-200 shadow-xl"
         >
-          {OPS_CAPABILITY_TOOLTIP}
+          <span className="block">{OPS_CAPABILITY_TOOLTIP}</span>
+          {current && (
+            <span className="block mt-1.5 text-amber-200 font-semibold">
+              {current.label}
+              <span className="font-normal text-ink-300"> — {current.desc}</span>
+            </span>
+          )}
+          {detail && <OpsStateBullets detail={detail} testId="ops-capability-tooltip-details" className="mt-1" />}
         </span>
       )}
+    </span>
+  )
+}
+
+// 015: the can/won't bullets for one ops state — shared by the state menu's
+// Details expander and the capability line's tooltip.
+function OpsStateBullets({ detail, testId, className }: {
+  detail: { can: string[]; wont: string }
+  testId: string
+  className?: string
+}) {
+  return (
+    <span data-testid={testId} className={cn('block text-[10px] leading-snug', className)}>
+      {detail.can.map((line) => (
+        <span key={line} className="flex gap-1.5 text-ink-300">
+          <span className="text-emerald-400 shrink-0" aria-hidden>+</span>
+          <span>{line}</span>
+        </span>
+      ))}
+      <span className="flex gap-1.5 text-ink-400">
+        <span className="text-ink-500 shrink-0" aria-hidden>–</span>
+        <span>{detail.wont}</span>
+      </span>
     </span>
   )
 }

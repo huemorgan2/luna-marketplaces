@@ -200,11 +200,36 @@ describe('014 state picker (in-composer dropdown)', () => {
     expect(stateTrigger().textContent).toContain('Identify')
     await openStateMenu()
     expect(screen.getByTestId('state-option-identify').textContent)
-      .toContain('Diagnose only — report problems, change nothing.')
+      .toContain("Diagnose Luna's own playbooks and plugins — report, change nothing.")
     expect(screen.getByTestId('state-option-fix_approve').textContent)
-      .toContain('Prepare fixes; each waits for your approval.')
+      .toContain("Fix Luna's own playbooks and plugins; each fix waits for your approval.")
     expect(screen.getByTestId('state-option-fix_publish').textContent)
-      .toContain('Fix and publish without waiting.')
+      .toContain("Fix Luna's own playbooks and plugins, publish without waiting.")
+  })
+
+  it('015: Details expander (ops only) explains what this agent works on, per option, and is remembered', async () => {
+    await renderPanel()
+    // Building chat: no Details affordance.
+    await openStateMenu()
+    expect(screen.queryByTestId('state-details-toggle')).toBeNull()
+    await act(async () => { fireEvent.keyDown(document, { key: 'Escape' }) })
+
+    await selectConv('ops chat')
+    await openStateMenu()
+    const toggle = screen.getByTestId('state-details-toggle')
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByTestId('state-details-intro')).toBeNull()
+    await act(async () => { fireEvent.click(toggle) })
+    // Menu stays open; intro + per-option can/won't bullets appear.
+    expect(screen.getByTestId('state-menu')).toBeTruthy()
+    expect(screen.getByTestId('state-details-intro').textContent).toContain('Luna herself')
+    expect(screen.getByTestId('state-details-identify').textContent).toContain('Changes nothing')
+    expect(screen.getByTestId('state-details-fix_approve').textContent).toContain('approval card')
+    expect(screen.getByTestId('state-details-fix_publish').textContent).toContain('Publishes, installs')
+    expect(localStorage.getItem('luna.chat.stateDetails')).toBe('1')
+    await act(async () => { fireEvent.click(toggle) })
+    expect(screen.queryByTestId('state-details-intro')).toBeNull()
+    expect(localStorage.getItem('luna.chat.stateDetails')).toBe('0')
   })
 
   it('closes on Escape and on outside click without writing', async () => {
@@ -278,6 +303,10 @@ describe('014 ops capability line', () => {
     const tip = screen.getByTestId('ops-capability-tooltip')
     expect(tip.textContent).toContain('Operations chat')
     expect(tip.textContent).toContain('the state only controls what the agent may change')
+    // 015: the tooltip names the current state and lists its can/won't bullets.
+    expect(tip.textContent).toContain('Identify')
+    expect(tip.textContent).toContain("Luna's own playbooks and plugins")
+    expect(screen.getByTestId('ops-capability-tooltip-details').textContent).toContain('Changes nothing')
     await act(async () => {
       fireEvent.mouseLeave(screen.getByTestId('ops-capability-line'))
     })
