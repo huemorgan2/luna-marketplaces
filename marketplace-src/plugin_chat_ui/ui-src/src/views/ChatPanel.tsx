@@ -34,7 +34,8 @@ import { LiveRunList, applyLiveEvent, isLiveEvent, type LiveEvent, type LiveRun 
 import { composerWidgets } from '../lib/composerWidgets'
 import { matchesFrustration, alertSuppressed, suppressAlert } from '../lib/chatAlerts'
 import {
-  STATE_OPTIONS, DEFAULT_STATE, convKind, convState, sortOpsFirst,
+  STATE_OPTIONS, DEFAULT_STATE, OPS_CAPABILITY, OPS_CAPABILITY_TOOLTIP,
+  convKind, convState, sortOpsFirst,
   patchConversationState, subscribeConvStateEvents,
   type ConversationKind, type ConvMeta,
 } from '../lib/convState'
@@ -3258,15 +3259,18 @@ function Composer({
               any time and Luna ingests each at the next step boundary. The
               working/offline status shares this row, left of the buttons. */}
           <div className="flex items-center justify-end gap-2 px-2 pb-2">
-            {(toolNames.length > 0 || offline) && (
-              <div className="flex-1 text-[11px] text-ink-500 flex items-center gap-2 min-w-0 pl-1">
-                {toolNames.length > 0 ? (
-                  <WorkingTools toolNames={toolNames} />
-                ) : (
-                  <span className="text-rose-400">offline — reconnecting…</span>
-                )}
-              </div>
+            {/* 014: the agent-state picker lives INSIDE the box, bottom-left —
+                it sets what the AGENT may do in this chat. User-driven only. */}
+            {convKind && convState && onConvStateChange && (
+              <StatePickerMenu kind={convKind} value={convState} onChange={onConvStateChange} />
             )}
+            <div className="flex-1 text-[11px] text-ink-500 flex items-center gap-2 min-w-0 pl-1">
+              {toolNames.length > 0 ? (
+                <WorkingTools toolNames={toolNames} />
+              ) : offline ? (
+                <span className="text-rose-400">offline — reconnecting…</span>
+              ) : null}
+            </div>
             {/* 008.95: attach files (paperclip). Paste and drag-drop work too. */}
             <input
               ref={fileInputRef}
@@ -3328,32 +3332,10 @@ function Composer({
         </div>
         {/* 008: model selector + context meter live OUTSIDE the message box. */}
         <div className="flex items-center px-1 pt-1.5">
-          {/* 089: conversation-state pulldown — bottom-left, user-driven only.
-              Ops keeps its amber accent; a building chat off its default state
-              gets a subtle luna tint so a non-default mode is visible. */}
-          {convKind && convState && onConvStateChange && (
-            <select
-              data-testid="state-pulldown"
-              value={convState}
-              onChange={(e) => onConvStateChange(e.target.value)}
-              title="Conversation mode"
-              className={cn(
-                'mr-2 shrink-0 appearance-none cursor-pointer rounded-md border bg-transparent px-1.5 py-0.5 text-[11px] outline-none transition hover:bg-white/[0.04]',
-                convKind === 'ops'
-                  ? 'border-amber-500/40 text-amber-300'
-                  : convState !== DEFAULT_STATE[convKind]
-                    ? 'border-luna-500/40 text-luna-300'
-                    : 'border-white/10 text-ink-400',
-              )}
-            >
-              {STATE_OPTIONS[convKind].map((o) => (
-                <option key={o.value} value={o.value} className="bg-ink-900 text-ink-100">
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          )}
           <ComposerModelSelect />
+          {/* 014 (ops only): amber capability line — what the current state
+              permits, live with state changes. Hover = one paragraph of depth. */}
+          {convKind === 'ops' && convState && <OpsCapabilityLine state={convState} />}
           {contextStatus && (
             <div className="ml-auto">
               <ContextMeter status={contextStatus} />
@@ -3362,6 +3344,164 @@ function Composer({
         </div>
       </div>
     </div>
+  )
+}
+
+// 014: agent-state picker — a custom upward menu in the model selector's
+// visual family (dark panel, eyebrow header, one-line rows), replacing the
+// 0.17.0 native <select>. Closed chip: hairline neutral border (amber TEXT in
+// ops); the amber/luna border shows only while the menu is open or the chip
+// is focused. Selection is the ONLY state-write trigger (never programmatic).
+function StatePickerMenu({ kind, value, onChange }: {
+  kind: ConversationKind
+  value: string
+  onChange: (v: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [focused, setFocused] = useState(false)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+
+  // Same close behavior as the model picker: click-outside + Esc.
+  useEffect(() => {
+    if (!open) return
+    function onDoc(e: MouseEvent) {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDoc)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  const options = STATE_OPTIONS[kind]
+  const current = options.find((o) => o.value === value) ?? options[0]
+  const accent = open || focused
+  return (
+    <div className="relative shrink-0" ref={rootRef}>
+      <button
+        type="button"
+        data-testid="state-pulldown"
+        onClick={() => setOpen((v) => !v)}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        title="Agent state — what the agent may do in this chat"
+        className={cn(
+          'inline-flex items-center gap-1 rounded-md border bg-transparent px-1.5 py-0.5 text-[11px] outline-none transition hover:bg-white/[0.04]',
+          accent
+            ? kind === 'ops' ? 'border-amber-500/60' : 'border-luna-500/50'
+            : 'border-white/10',
+          kind === 'ops'
+            ? 'text-amber-300'
+            : value !== DEFAULT_STATE[kind] ? 'text-luna-300' : 'text-ink-400',
+        )}
+      >
+        <span className="truncate max-w-[11rem]">{current.label}</span>
+        <ChevronDown className={cn('w-3 h-3 opacity-70 transition', open && 'rotate-180')} />
+      </button>
+      {open && (
+        <div
+          data-testid="state-menu"
+          role="listbox"
+          aria-label="Agent state"
+          className={cn(
+            'absolute bottom-full mb-2 left-0 z-50 fade-in',
+            'w-[min(19rem,calc(100vw-1.5rem))] rounded-2xl border border-white/10 bg-ink-900/95 backdrop-blur',
+            'shadow-2xl shadow-black/40 py-1.5',
+          )}
+        >
+          <div className="px-3.5 pt-2 pb-1.5 text-[11px] uppercase tracking-[0.16em] font-semibold text-ink-500 border-b border-white/5">
+            AGENT STATE
+          </div>
+          <ul className="py-1">
+            {options.map((o) => {
+              const active = o.value === value
+              return (
+                <li key={o.value} role="option" aria-selected={active}>
+                  <div
+                    tabIndex={0}
+                    data-testid={`state-option-${o.value}`}
+                    onClick={() => {
+                      setOpen(false)
+                      if (!active) onChange(o.value)
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        setOpen(false)
+                        if (!active) onChange(o.value)
+                      }
+                    }}
+                    className={cn(
+                      'w-full flex items-start gap-2 px-3.5 py-2 text-left cursor-pointer transition hover:bg-white/10',
+                      active && (kind === 'ops'
+                        ? 'bg-amber-500/15 ring-1 ring-inset ring-amber-400/50'
+                        : 'bg-luna-500/25 ring-1 ring-inset ring-luna-400/60'),
+                    )}
+                  >
+                    <span className="min-w-0 flex-1">
+                      <span
+                        className={cn(
+                          'block text-[12px] font-semibold',
+                          active ? (kind === 'ops' ? 'text-amber-200' : 'text-luna-100') : 'text-ink-100',
+                        )}
+                      >
+                        {o.label}
+                      </span>
+                      <span className="block text-[10px] leading-snug text-ink-500 mt-0.5">{o.desc}</span>
+                    </span>
+                    {active && (
+                      <Check
+                        className={cn('w-3.5 h-3.5 shrink-0 mt-0.5', kind === 'ops' ? 'text-amber-300' : 'text-luna-300')}
+                        aria-hidden
+                      />
+                    )}
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// 014 (ops only): the capability line right of the model selector — restates
+// what the current state permits, amber, with a dotted underline as the
+// visible hover affordance. The tooltip is depth, not the primary surface:
+// the line alone carries the bottom line (ux_guidelines §6).
+function OpsCapabilityLine({ state }: { state: string }) {
+  const [tip, setTip] = useState(false)
+  const text = OPS_CAPABILITY[state]
+  if (!text) return null
+  return (
+    <span
+      data-testid="ops-capability-line"
+      tabIndex={0}
+      onMouseEnter={() => setTip(true)}
+      onMouseLeave={() => setTip(false)}
+      onFocus={() => setTip(true)}
+      onBlur={() => setTip(false)}
+      className="relative ml-2 shrink min-w-0 truncate text-[11px] text-amber-300/90 underline decoration-dotted decoration-amber-500/50 underline-offset-2 cursor-help outline-none"
+    >
+      {text}
+      {tip && (
+        <span
+          role="tooltip"
+          data-testid="ops-capability-tooltip"
+          className="absolute bottom-full left-0 mb-1.5 z-50 block w-72 whitespace-normal rounded-lg border border-white/15 bg-ink-950 px-2.5 py-2 text-left text-[10px] leading-snug text-ink-200 shadow-xl"
+        >
+          {OPS_CAPABILITY_TOOLTIP}
+        </span>
+      )}
+    </span>
   )
 }
 

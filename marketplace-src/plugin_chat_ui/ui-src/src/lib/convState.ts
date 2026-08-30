@@ -22,21 +22,40 @@ export interface ConvMeta {
 export interface StateOption {
   value: string
   label: string
+  /** 014: ONE dim explanation line under the label in the state menu. */
+  desc: string
 }
 
 // The full state vocabulary, per kind. Labels are the human words the
-// pulldown shows; values are what the server stores and broadcasts.
+// picker shows; values are what the server stores and broadcasts.
 export const STATE_OPTIONS: Record<ConversationKind, StateOption[]> = {
   building: [
-    { value: 'planning', label: 'Planning' },
-    { value: 'building', label: 'Building' },
+    { value: 'planning', label: 'Planning', desc: 'Think and plan — research and notes, no building yet.' },
+    { value: 'building', label: 'Building', desc: 'Full build — create and change playbooks, schedules, files.' },
   ],
   ops: [
-    { value: 'identify', label: 'Identify' },
-    { value: 'fix_approve', label: 'Fix & wait for approval' },
-    { value: 'fix_publish', label: 'Fix & publish' },
+    { value: 'identify', label: 'Identify', desc: 'Diagnose only — report problems, change nothing.' },
+    { value: 'fix_approve', label: 'Fix & wait for approval', desc: 'Prepare fixes; each waits for your approval.' },
+    { value: 'fix_publish', label: 'Fix & publish', desc: 'Fix and publish without waiting.' },
   ],
 }
+
+// 014 (ops only): the amber capability line next to the model selector —
+// the bottom line of what the current state permits.
+export const OPS_CAPABILITY: Record<string, string> = {
+  identify: 'diagnose only — no changes',
+  fix_approve: 'fixes wait for your approval',
+  fix_publish: 'fixes publish without approval',
+}
+
+// 014: the capability line's hover tooltip — one tight paragraph of depth
+// (ux_guidelines §6: the line alone carries the bottom line; this is extra).
+export const OPS_CAPABILITY_TOOLTIP =
+  'This is the Operations chat — the agent watches and repairs what you built. ' +
+  'The state selector in the message box sets what it may do: Identify diagnoses only; ' +
+  'Fix & wait for approval prepares fixes that wait for your approval; ' +
+  'Fix & publish applies fixes right away. Background reports land here in every state — ' +
+  'the state only controls what the agent may change.'
 
 export const DEFAULT_STATE: Record<ConversationKind, string> = {
   building: 'building',
