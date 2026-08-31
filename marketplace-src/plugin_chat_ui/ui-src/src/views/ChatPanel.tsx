@@ -1506,7 +1506,7 @@ export function ChatPanel({
         sortOpsFirst(
           prev.map((c) =>
             c.id === ev.conversation_id
-              ? { ...c, ...(ev.kind ? { kind: ev.kind } : {}), state: ev.state ?? c.state }
+              ? { ...c, ...(ev.kind === 'building' || ev.kind === 'ops' ? { kind: ev.kind } : {}), state: ev.state ?? c.state }
               : c,
           ),
         ),
