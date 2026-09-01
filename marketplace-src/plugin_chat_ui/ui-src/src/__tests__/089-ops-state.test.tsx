@@ -1,14 +1,14 @@
 // @vitest-environment jsdom
-// 089/014 — build/operate conversations. Ops conversations pin to the top of
-// the sidebar with an amber OPS treatment and no delete affordance (the
-// server 403s DELETE for them). The composer carries the agent-state picker
-// INSIDE the message box (014): a custom upward menu (eyebrow header, bold
-// label + one explanation line per option) whose options depend on the
-// conversation kind; picking one PATCHes the server, and a
-// conversation.state_changed SSE event updates the local list live. The
-// state is never flipped programmatically — only by the user's pick. Ops
-// chats also get an amber capability line next to the model selector with a
-// hover tooltip.
+// 089/014/098 — build/operate conversations. Ops conversations pin to the
+// top of the sidebar with an amber OPS treatment (amber title + a very faint
+// amber wash; the border shows only while selected) and no delete affordance
+// (the server 403s DELETE for them). The composer carries the agent-state
+// picker INSIDE the message box (014) for BUILDING chats only: a custom
+// upward menu (eyebrow header, bold label + one explanation line per option);
+// picking one PATCHes the server, and a conversation.state_changed SSE event
+// updates the local list live. The state is never flipped programmatically —
+// only by the user's pick. luna 098: ops chats have no modes — no picker, no
+// capability line; legacy mode states on ops rows are healed to 'building'.
 import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest'
 import { render, screen, waitFor, act, cleanup, fireEvent } from '@testing-library/react'
 import { ChatPanel } from '../views/ChatPanel'
@@ -143,6 +143,20 @@ describe('089 ops conversations', () => {
     expect(items[1].querySelector('[data-testid="ops-tag"]')).toBeNull()
   })
 
+  it('098: unselected ops row has a faint amber wash and NO amber border; selected gets both', async () => {
+    await renderPanel()
+    // Boot selected the build chat — the ops row is inactive.
+    let opsRow = screen.getAllByTestId('conv-item').find((el) => el.textContent?.includes('ops chat'))!
+    expect(opsRow.className).toContain('bg-amber-500/5')
+    expect(opsRow.className).toContain('border-transparent')
+    expect(opsRow.className).not.toContain('border-amber')
+
+    await selectConv('ops chat')
+    opsRow = screen.getAllByTestId('conv-item').find((el) => el.textContent?.includes('ops chat'))!
+    expect(opsRow.className).toContain('border-amber-500/40')
+    expect(opsRow.className).toContain('bg-amber-500/10')
+  })
+
   it('hides the delete affordance for ops conversations only', async () => {
     await renderPanel()
     // Active = building: delete is in the header menu.
@@ -194,42 +208,13 @@ describe('014 state picker (in-composer dropdown)', () => {
       ?.getAttribute('aria-selected')).toBe('false')
   })
 
-  it('lists the ops states with their explanations for ops conversations', async () => {
+  it('098: ops conversations have no state picker at all', async () => {
     await renderPanel()
+    expect(screen.getByTestId('state-pulldown')).toBeTruthy() // building chat has it
     await selectConv('ops chat')
-    expect(stateTrigger().textContent).toContain('Identify')
-    await openStateMenu()
-    expect(screen.getByTestId('state-option-identify').textContent)
-      .toContain("Diagnose Luna's own playbooks and plugins — report, change nothing.")
-    expect(screen.getByTestId('state-option-fix_approve').textContent)
-      .toContain("Fix Luna's own playbooks and plugins; each fix waits for your approval.")
-    expect(screen.getByTestId('state-option-fix_publish').textContent)
-      .toContain("Fix Luna's own playbooks and plugins, publish without waiting.")
-  })
-
-  it('015: Details expander (ops only) explains what this agent works on, per option, and is remembered', async () => {
-    await renderPanel()
-    // Building chat: no Details affordance.
-    await openStateMenu()
+    await waitFor(() => expect(h.messages).toHaveBeenCalledWith('o-1'))
+    expect(screen.queryByTestId('state-pulldown')).toBeNull()
     expect(screen.queryByTestId('state-details-toggle')).toBeNull()
-    await act(async () => { fireEvent.keyDown(document, { key: 'Escape' }) })
-
-    await selectConv('ops chat')
-    await openStateMenu()
-    const toggle = screen.getByTestId('state-details-toggle')
-    expect(toggle.getAttribute('aria-expanded')).toBe('false')
-    expect(screen.queryByTestId('state-details-intro')).toBeNull()
-    await act(async () => { fireEvent.click(toggle) })
-    // Menu stays open; intro + per-option can/won't bullets appear.
-    expect(screen.getByTestId('state-menu')).toBeTruthy()
-    expect(screen.getByTestId('state-details-intro').textContent).toContain('Luna herself')
-    expect(screen.getByTestId('state-details-identify').textContent).toContain('Changes nothing')
-    expect(screen.getByTestId('state-details-fix_approve').textContent).toContain('approval card')
-    expect(screen.getByTestId('state-details-fix_publish').textContent).toContain('Publishes, installs')
-    expect(localStorage.getItem('luna.chat.stateDetails')).toBe('1')
-    await act(async () => { fireEvent.click(toggle) })
-    expect(screen.queryByTestId('state-details-intro')).toBeNull()
-    expect(localStorage.getItem('luna.chat.stateDetails')).toBe('0')
   })
 
   it('closes on Escape and on outside click without writing', async () => {
@@ -253,69 +238,20 @@ describe('014 state picker (in-composer dropdown)', () => {
     expect(h.patchConversationState).toHaveBeenCalledWith('b-1', 'building')
     expect(stateTrigger().textContent).toContain('Building')
     expect(screen.queryByTestId('state-menu')).toBeNull()
-
-    await selectConv('ops chat')
-    await pickState('fix_publish')
-    expect(h.patchConversationState).toHaveBeenCalledWith('o-1', 'fix_publish')
-    expect(stateTrigger().textContent).toContain('Fix & publish')
   })
 
-  it('closed chip has no amber border — amber only while the menu is open (ops)', async () => {
+  it('098: no capability line anywhere — the bottom state label is gone', async () => {
     await renderPanel()
-    await selectConv('ops chat')
-    const closed = stateTrigger()
-    expect(closed.className).toContain('border-white/10') // hairline neutral
-    expect(closed.className).not.toContain('border-amber')
-    expect(closed.className).toContain('text-amber-300') // amber TEXT stays
-    await openStateMenu()
-    expect(stateTrigger().className).toContain('border-amber-500/60')
-    await act(async () => {
-      fireEvent.keyDown(document, { key: 'Escape' })
-    })
-    expect(stateTrigger().className).not.toContain('border-amber')
-  })
-})
-
-describe('014 ops capability line', () => {
-  it('shows the per-state amber capability text — ops chats only', async () => {
-    await renderPanel()
-    // Building chat: no capability line.
     expect(screen.queryByTestId('ops-capability-line')).toBeNull()
-
     await selectConv('ops chat')
-    expect(screen.getByTestId('ops-capability-line').textContent)
-      .toContain('diagnose only — no changes')
-    await pickState('fix_approve')
-    expect(screen.getByTestId('ops-capability-line').textContent)
-      .toContain('fixes wait for your approval')
-    await pickState('fix_publish')
-    expect(screen.getByTestId('ops-capability-line').textContent)
-      .toContain('fixes publish without approval')
-  })
-
-  it('shows the explanation tooltip on hover, hides it on leave', async () => {
-    await renderPanel()
-    await selectConv('ops chat')
-    expect(screen.queryByTestId('ops-capability-tooltip')).toBeNull()
-    await act(async () => {
-      fireEvent.mouseEnter(screen.getByTestId('ops-capability-line'))
-    })
-    const tip = screen.getByTestId('ops-capability-tooltip')
-    expect(tip.textContent).toContain('Operations chat')
-    expect(tip.textContent).toContain('the state only controls what the agent may change')
-    // 015: the tooltip names the current state and lists its can/won't bullets.
-    expect(tip.textContent).toContain('Identify')
-    expect(tip.textContent).toContain("Luna's own playbooks and plugins")
-    expect(screen.getByTestId('ops-capability-tooltip-details').textContent).toContain('Changes nothing')
-    await act(async () => {
-      fireEvent.mouseLeave(screen.getByTestId('ops-capability-line'))
-    })
+    await waitFor(() => expect(h.messages).toHaveBeenCalledWith('o-1'))
+    expect(screen.queryByTestId('ops-capability-line')).toBeNull()
     expect(screen.queryByTestId('ops-capability-tooltip')).toBeNull()
   })
 })
 
 describe('089 live state sync', () => {
-  it('conversation.state_changed updates the list (and the open picker + capability line)', async () => {
+  it('conversation.state_changed updates the list (and the open picker)', async () => {
     let broadcast: ((ev: ConvStateEvent) => void) | undefined
     h.subscribeConvStateEvents.mockImplementation(((cb: (ev: ConvStateEvent) => void) => {
       broadcast = cb
@@ -331,14 +267,13 @@ describe('089 live state sync', () => {
     expect(stateTrigger().textContent).toContain('Building')
     expect(h.patchConversationState).not.toHaveBeenCalled() // mirror, not a write
 
-    // A BACKGROUND conversation's state changes — its row is patched too, and
-    // the ops capability line reflects it once that chat is opened.
+    // 098: a stray event for the ops chat changes nothing visible — ops chats
+    // render no state UI regardless of the stored value.
     await act(async () => {
       broadcast!({ conversation_id: 'o-1', kind: 'ops', state: 'fix_approve' })
     })
     await selectConv('ops chat')
-    expect(stateTrigger().textContent).toContain('Fix & wait for approval')
-    expect(screen.getByTestId('ops-capability-line').textContent)
-      .toContain('fixes wait for your approval')
+    expect(screen.queryByTestId('state-pulldown')).toBeNull()
+    expect(screen.queryByTestId('ops-capability-line')).toBeNull()
   })
 })

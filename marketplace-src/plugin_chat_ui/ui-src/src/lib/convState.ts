@@ -28,75 +28,21 @@ export interface StateOption {
 
 // The full state vocabulary, per kind. Labels are the human words the
 // picker shows; values are what the server stores and broadcasts.
+// luna 098: ops chats have no modes any more — they always run 'building'
+// (rows from older cores may still carry a legacy mode; convState heals it).
 export const STATE_OPTIONS: Record<ConversationKind, StateOption[]> = {
   building: [
     { value: 'planning', label: 'Planning', desc: 'Think and plan — research and notes, no building yet.' },
     { value: 'building', label: 'Building', desc: 'Full build — create and change playbooks, schedules, files.' },
   ],
   ops: [
-    { value: 'identify', label: 'Identify', desc: "Diagnose Luna's own playbooks and plugins — report, change nothing." },
-    { value: 'fix_approve', label: 'Fix & wait for approval', desc: "Fix Luna's own playbooks and plugins; each fix waits for your approval." },
-    { value: 'fix_publish', label: 'Fix & publish', desc: "Fix Luna's own playbooks and plugins, publish without waiting." },
+    { value: 'building', label: 'Building', desc: 'Full toolset — the publish gates do the enforcing.' },
   ],
 }
 
-// 015 (ops only): what THIS agent works on. The state menu's one-liners
-// alone read as if the fixes were about the user's data — they are not: the
-// operations agent maintains Luna herself. Shown in the menu's "Details"
-// expander (per option) and in the capability line's tooltip (current state).
-export const OPS_AGENT_INTRO =
-  "This agent maintains Luna herself — her own playbooks, plugins, connectors and schedules. Not your data."
-
-export interface OpsStateDetail {
-  /** What the agent may touch in this state. */
-  can: string[]
-  /** What it will NOT do in this state. */
-  wont: string
-}
-
-export const OPS_STATE_DETAILS: Record<string, OpsStateDetail> = {
-  identify: {
-    can: [
-      'Reads playbooks, plugins, connectors, schedules and run logs',
-      'Reports what is broken and proposes the fix, here in this chat',
-    ],
-    wont: 'Changes nothing — no edits, no installs, no publishing.',
-  },
-  fix_approve: {
-    can: [
-      'Edits playbooks, plugin settings, connectors and schedules',
-      'Stages every fix as an approval card — nothing lands until you say yes',
-    ],
-    wont: 'Never publishes or installs on its own.',
-  },
-  fix_publish: {
-    can: [
-      'Edits playbooks, plugin settings, connectors and schedules',
-      'Publishes, installs and upgrades plugins right away',
-    ],
-    wont: 'Waits for nobody — every fix goes live as soon as it is made.',
-  },
-}
-
-// 014 (ops only): the amber capability line next to the model selector —
-// the bottom line of what the current state permits.
-export const OPS_CAPABILITY: Record<string, string> = {
-  identify: 'diagnose only — no changes',
-  fix_approve: 'fixes wait for your approval',
-  fix_publish: 'fixes publish without approval',
-}
-
-// 014/015: the capability line's hover tooltip — one tight intro sentence of
-// depth (ux_guidelines §6: the line alone carries the bottom line). The
-// per-state can/won't bullets (OPS_STATE_DETAILS) render under it.
-export const OPS_CAPABILITY_TOOLTIP =
-  'This is the Operations chat: the agent watches and repairs Luna herself. ' +
-  'The state selector in the message box sets what it may change; ' +
-  'background reports land here in every state — the state only controls what the agent may change.'
-
 export const DEFAULT_STATE: Record<ConversationKind, string> = {
   building: 'building',
-  ops: 'identify',
+  ops: 'building',
 }
 
 /** Kind of a conversation row — anything that isn't 'ops' is 'building'. */

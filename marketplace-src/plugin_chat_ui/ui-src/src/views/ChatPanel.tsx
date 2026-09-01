@@ -34,8 +34,7 @@ import { LiveRunList, applyLiveEvent, isLiveEvent, type LiveEvent, type LiveRun 
 import { composerWidgets } from '../lib/composerWidgets'
 import { matchesFrustration, alertSuppressed, suppressAlert } from '../lib/chatAlerts'
 import {
-  STATE_OPTIONS, DEFAULT_STATE, OPS_CAPABILITY, OPS_CAPABILITY_TOOLTIP,
-  OPS_AGENT_INTRO, OPS_STATE_DETAILS,
+  STATE_OPTIONS, DEFAULT_STATE,
   convKind, convState, sortOpsFirst,
   patchConversationState, subscribeConvStateEvents,
   type ConversationKind, type ConvMeta,
@@ -3338,8 +3337,9 @@ function Composer({
               working/offline status shares this row, left of the buttons. */}
           <div className="flex items-center justify-end gap-2 px-2 pb-2">
             {/* 014: the agent-state picker lives INSIDE the box, bottom-left —
-                it sets what the AGENT may do in this chat. User-driven only. */}
-            {convKind && convState && onConvStateChange && (
+                it sets what the AGENT may do in this chat. User-driven only.
+                luna 098: building chats only — ops chats have no modes. */}
+            {convKind === 'building' && convState && onConvStateChange && (
               <StatePickerMenu kind={convKind} value={convState} onChange={onConvStateChange} />
             )}
             <div className="flex-1 text-[11px] text-ink-500 flex items-center gap-2 min-w-0 pl-1">
@@ -3411,9 +3411,6 @@ function Composer({
         {/* 008: model selector + context meter live OUTSIDE the message box. */}
         <div className="flex items-center px-1 pt-1.5">
           <ComposerModelSelect />
-          {/* 014 (ops only): amber capability line — what the current state
-              permits, live with state changes. Hover = one paragraph of depth. */}
-          {convKind === 'ops' && convState && <OpsCapabilityLine state={convState} />}
           {contextStatus && (
             <div className="ml-auto">
               <ContextMeter status={contextStatus} />
@@ -3427,11 +3424,11 @@ function Composer({
 
 // 014: agent-state picker — a custom upward menu in the model selector's
 // visual family (dark panel, eyebrow header, one-line rows), replacing the
-// 0.17.0 native <select>. Closed chip: hairline neutral border (amber TEXT in
-// ops); the amber/luna border shows only while the menu is open or the chip
-// is focused. Selection is the ONLY state-write trigger (never programmatic).
-const STATE_DETAILS_KEY = 'luna.chat.stateDetails'
-
+// 0.17.0 native <select>. Closed chip: hairline neutral border; the luna
+// border shows only while the menu is open or the chip is focused. Selection
+// is the ONLY state-write trigger (never programmatic).
+// luna 098: building chats only — ops chats lost their modes, so all the
+// ops styling, the Details expander and the capability line are gone.
 function StatePickerMenu({ kind, value, onChange }: {
   kind: ConversationKind
   value: string
@@ -3439,18 +3436,6 @@ function StatePickerMenu({ kind, value, onChange }: {
 }) {
   const [open, setOpen] = useState(false)
   const [focused, setFocused] = useState(false)
-  // 015 (ops only): "Details" expander — per-option can/won't bullets that
-  // say what THIS agent works on (Luna herself). Remembered per browser.
-  const [details, setDetails] = useState<boolean>(() => {
-    try { return localStorage.getItem(STATE_DETAILS_KEY) === '1' } catch { return false }
-  })
-  const toggleDetails = () => {
-    setDetails((v) => {
-      const next = !v
-      try { localStorage.setItem(STATE_DETAILS_KEY, next ? '1' : '0') } catch { /* unavailable */ }
-      return next
-    })
-  }
   const rootRef = useRef<HTMLDivElement | null>(null)
 
   // Same close behavior as the model picker: click-outside + Esc.
@@ -3486,12 +3471,8 @@ function StatePickerMenu({ kind, value, onChange }: {
         title="Agent state — what the agent may do in this chat"
         className={cn(
           'inline-flex items-center gap-1 rounded-md border bg-transparent px-1.5 py-0.5 text-[11px] outline-none transition hover:bg-white/[0.04]',
-          accent
-            ? kind === 'ops' ? 'border-amber-500/60' : 'border-luna-500/50'
-            : 'border-white/10',
-          kind === 'ops'
-            ? 'text-amber-300'
-            : value !== DEFAULT_STATE[kind] ? 'text-luna-300' : 'text-ink-400',
+          accent ? 'border-luna-500/50' : 'border-white/10',
+          value !== DEFAULT_STATE[kind] ? 'text-luna-300' : 'text-ink-400',
         )}
       >
         <span className="truncate max-w-[11rem]">{current.label}</span>
@@ -3510,24 +3491,7 @@ function StatePickerMenu({ kind, value, onChange }: {
         >
           <div className="flex items-center px-3.5 pt-2 pb-1.5 text-[11px] uppercase tracking-[0.16em] font-semibold text-ink-500 border-b border-white/5">
             <span>AGENT STATE</span>
-            {kind === 'ops' && (
-              <button
-                type="button"
-                data-testid="state-details-toggle"
-                aria-expanded={details}
-                onClick={(e) => { e.stopPropagation(); toggleDetails() }}
-                className="ml-auto inline-flex items-center gap-0.5 normal-case tracking-normal font-medium text-[11px] text-amber-300/80 hover:text-amber-200 outline-none focus-visible:underline"
-              >
-                Details
-                <ChevronDown className={cn('w-3 h-3 transition', details && 'rotate-180')} aria-hidden />
-              </button>
-            )}
           </div>
-          {kind === 'ops' && details && (
-            <div data-testid="state-details-intro" className="px-3.5 pt-2 pb-1 text-[10.5px] leading-snug text-ink-300">
-              {OPS_AGENT_INTRO}
-            </div>
-          )}
           <ul className="py-1">
             {options.map((o) => {
               const active = o.value === value
@@ -3549,34 +3513,22 @@ function StatePickerMenu({ kind, value, onChange }: {
                     }}
                     className={cn(
                       'w-full flex items-start gap-2 px-3.5 py-2 text-left cursor-pointer transition hover:bg-white/10',
-                      active && (kind === 'ops'
-                        ? 'bg-amber-500/15 ring-1 ring-inset ring-amber-400/50'
-                        : 'bg-luna-500/25 ring-1 ring-inset ring-luna-400/60'),
+                      active && 'bg-luna-500/25 ring-1 ring-inset ring-luna-400/60',
                     )}
                   >
                     <span className="min-w-0 flex-1">
                       <span
                         className={cn(
                           'block text-[12px] font-semibold',
-                          active ? (kind === 'ops' ? 'text-amber-200' : 'text-luna-100') : 'text-ink-100',
+                          active ? 'text-luna-100' : 'text-ink-100',
                         )}
                       >
                         {o.label}
                       </span>
                       <span className="block text-[10px] leading-snug text-ink-500 mt-0.5">{o.desc}</span>
-                      {kind === 'ops' && details && OPS_STATE_DETAILS[o.value] && (
-                        <OpsStateBullets
-                          detail={OPS_STATE_DETAILS[o.value]}
-                          testId={`state-details-${o.value}`}
-                          className="mt-1.5"
-                        />
-                      )}
                     </span>
                     {active && (
-                      <Check
-                        className={cn('w-3.5 h-3.5 shrink-0 mt-0.5', kind === 'ops' ? 'text-amber-300' : 'text-luna-300')}
-                        aria-hidden
-                      />
+                      <Check className="w-3.5 h-3.5 shrink-0 mt-0.5 text-luna-300" aria-hidden />
                     )}
                   </div>
                 </li>
@@ -3586,70 +3538,6 @@ function StatePickerMenu({ kind, value, onChange }: {
         </div>
       )}
     </div>
-  )
-}
-
-// 014 (ops only): the capability line right of the model selector — restates
-// what the current state permits, amber, with a dotted underline as the
-// visible hover affordance. The tooltip is depth, not the primary surface:
-// the line alone carries the bottom line (ux_guidelines §6).
-function OpsCapabilityLine({ state }: { state: string }) {
-  const [tip, setTip] = useState(false)
-  const text = OPS_CAPABILITY[state]
-  const current = STATE_OPTIONS.ops.find((o) => o.value === state)
-  const detail = OPS_STATE_DETAILS[state]
-  if (!text) return null
-  return (
-    <span
-      data-testid="ops-capability-line"
-      tabIndex={0}
-      onMouseEnter={() => setTip(true)}
-      onMouseLeave={() => setTip(false)}
-      onFocus={() => setTip(true)}
-      onBlur={() => setTip(false)}
-      className="relative ml-2 shrink min-w-0 truncate text-[11px] text-amber-300/90 underline decoration-dotted decoration-amber-500/50 underline-offset-2 cursor-help outline-none"
-    >
-      {text}
-      {tip && (
-        <span
-          role="tooltip"
-          data-testid="ops-capability-tooltip"
-          className="absolute bottom-full left-0 mb-1.5 z-50 block w-80 whitespace-normal rounded-lg border border-white/15 bg-ink-950 px-2.5 py-2 text-left text-[10px] leading-snug text-ink-200 shadow-xl"
-        >
-          <span className="block">{OPS_CAPABILITY_TOOLTIP}</span>
-          {current && (
-            <span className="block mt-1.5 text-amber-200 font-semibold">
-              {current.label}
-              <span className="font-normal text-ink-300"> — {current.desc}</span>
-            </span>
-          )}
-          {detail && <OpsStateBullets detail={detail} testId="ops-capability-tooltip-details" className="mt-1" />}
-        </span>
-      )}
-    </span>
-  )
-}
-
-// 015: the can/won't bullets for one ops state — shared by the state menu's
-// Details expander and the capability line's tooltip.
-function OpsStateBullets({ detail, testId, className }: {
-  detail: { can: string[]; wont: string }
-  testId: string
-  className?: string
-}) {
-  return (
-    <span data-testid={testId} className={cn('block text-[10px] leading-snug', className)}>
-      {detail.can.map((line) => (
-        <span key={line} className="flex gap-1.5 text-ink-300">
-          <span className="text-emerald-400 shrink-0" aria-hidden>+</span>
-          <span>{line}</span>
-        </span>
-      ))}
-      <span className="flex gap-1.5 text-ink-400">
-        <span className="text-ink-500 shrink-0" aria-hidden>–</span>
-        <span>{detail.wont}</span>
-      </span>
-    </span>
   )
 }
 
@@ -4360,8 +4248,9 @@ function ConversationItem({
   /** 057: mobile list rows — 44px+ touch targets */
   big?: boolean
 }) {
-  // 089: ops conversations read amber (title + border) and carry an OPS chip
-  // — they're the rows that watch production, pinned above the build chats.
+  // 089/098: ops conversations read amber (title + a very faint amber wash)
+  // and carry an OPS chip — they're the rows that watch production, pinned
+  // above the build chats. The amber border shows only while selected.
   const ops = convKind(conv) === 'ops'
   return (
     <button
@@ -4371,10 +4260,12 @@ function ConversationItem({
         'w-full text-left px-3 rounded-lg text-sm transition flex items-center gap-1.5 min-w-0',
         big ? 'py-3 min-h-[44px]' : 'py-2',
         active
-          ? 'bg-luna-600/20 text-luna-100 border border-luna-500/30'
-          : 'text-ink-300 hover:text-ink-50 hover:bg-white/5 border border-transparent',
-        ops && 'text-amber-300 border-amber-500/40',
-        ops && active && 'bg-amber-500/10',
+          ? ops
+            ? 'bg-amber-500/10 text-amber-300 border border-amber-500/40'
+            : 'bg-luna-600/20 text-luna-100 border border-luna-500/30'
+          : ops
+            ? 'bg-amber-500/5 text-amber-300 hover:bg-amber-500/10 border border-transparent'
+            : 'text-ink-300 hover:text-ink-50 hover:bg-white/5 border border-transparent',
       )}
       title={conv.title || 'Untitled'}
     >
