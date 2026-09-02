@@ -31,6 +31,6 @@ and swaps the recap for a one-line reset note).
   calls the API + system line + transcript intact; section present on ops;
   Cancel disarms without a call; 404 shows the unsupported message; `/reset`
   resets without sending to the agent; reset:false reads "Nothing to
-  reset"). Full suite 137/137 green.
+  reset"). Full suite 131/131 green (19 files).
 - tsc + vite build clean; `node tools/chat-ui-gate.mjs` green.
 - Published to marketplaces.com.ai official.
