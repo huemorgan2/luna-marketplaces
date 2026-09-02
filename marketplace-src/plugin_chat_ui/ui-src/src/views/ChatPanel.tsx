@@ -1,7 +1,7 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Plus, Send, Trash2, Loader2, MoreHorizontal, MoreVertical, Pencil, Check, X, Copy, ChevronDown, ChevronLeft, Info, Square, Clock, Wrench, Paperclip, FileText, Brain, Zap, Hand } from 'lucide-react'
+import { Plus, Send, Trash2, Loader2, MoreHorizontal, MoreVertical, Check, X, Copy, ChevronDown, ChevronLeft, Info, Square, Clock, Wrench, Paperclip, FileText, Brain, Zap, Hand, Settings } from 'lucide-react'
 import { cn } from '@luna/lib/cn'
 import { agentName, useIdentity } from '@luna/lib/identityStore'
 import {
@@ -39,6 +39,7 @@ import {
   patchConversationState, subscribeConvStateEvents,
   type ConversationKind, type ConvMeta,
 } from '../lib/convState'
+import { CHAT_TINTS, ChatTintContext, chatTint, setChatTint, type TintId } from '../lib/chatTint'
 import { groupApprovals, isAutoApproved, type ApprovalRecord } from '@luna/lib/approvalGroups'
 import { AgentAvatar } from '@luna/components/AgentAvatar'
 import { ModelPickerMenu } from '@luna/components/ModelPickerMenu'
@@ -2413,7 +2414,13 @@ export function ChatPanel({
   const activeKind: ConversationKind | null = activeConv ? convKind(activeConv) : null
   const activeState = activeConv ? convState(activeConv) : null
 
+  // 019: the active chat's tint. localStorage is the source of truth; the
+  // bump just forces a re-render when the settings dialog writes a new pick.
+  const [, setTintBump] = useState(0)
+  const activeTint = chatTint(activeId, activeKind)
+
   const chatArea = (
+    <ChatTintContext.Provider value={activeTint}>
     <div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
         <ChatHeader
           identity={identity}
@@ -2424,6 +2431,10 @@ export function ChatPanel({
           debugMode={debugMode}
           debugEvents={debugEvents}
           approvals={approvals}
+          conversations={conversations}
+          listHidden={compact && !isMobile}
+          onSwitch={(id) => selectConversation(id)}
+          onTintChanged={() => setTintBump((v) => v + 1)}
           onBack={isMobile ? () => setActiveId(null) : undefined}
           onRenamed={(title) => {
             setConversations((prev) => prev.map((x) => (x.id === activeId ? { ...x, title } : x)))
@@ -2442,7 +2453,7 @@ export function ChatPanel({
         {/* 011: top padding moved off the container so alerts can sit flush;
             the spacer below restores the original message offset.
             013: the feedback banner moved out — it docks onto the composer. */}
-        <div ref={scrollRef} onScroll={handleScroll} className={cn('flex-1 overflow-y-auto overflow-x-hidden overscroll-contain', dense ? 'px-3 pb-3' : 'px-6 pb-6')}>
+        <div ref={scrollRef} onScroll={handleScroll} className={cn('flex-1 overflow-y-auto overflow-x-hidden overscroll-contain', dense ? 'px-3 pb-3' : 'px-6 pb-6', activeTint?.area)} data-testid="chat-scroll-pane">
           <div aria-hidden className={dense ? 'h-3' : 'h-6'} />
           {loadingMessages && (
             <div className="flex items-center justify-center py-12 text-ink-400 text-sm gap-2">
@@ -2583,6 +2594,7 @@ export function ChatPanel({
           />
         </div>
       </div>
+    </ChatTintContext.Provider>
   )
 
   if (isMobile) {
@@ -2832,6 +2844,10 @@ function MessageMenu({ message }: { message: UIMessage }) {
 
 function Bubble({ message, emoji, avatarUrl }: { message: UIMessage; emoji: string; avatarUrl?: string | null }) {
   const isUser = message.role === 'user'
+  // 019: the chat's tint colors the agent's PLAIN bubbles only — user bubbles
+  // keep the luna identity, reflection/automation bubbles' color IS their
+  // meaning. twMerge lets the tint's bg/border override the defaults.
+  const tint = useContext(ChatTintContext)
   // 009.001/phase02 (E12): any non-null source is an automation origin —
   // badge generically, no plugin names in core. One named exception:
   // source="curiosity" is the repeatable reflection channel and gets its own
@@ -2879,7 +2895,7 @@ function Bubble({ message, emoji, avatarUrl }: { message: UIMessage; emoji: stri
               ? 'bg-sky-950/40 border border-sky-500/20 text-ink-100'
               : isAuto
                 ? 'bg-violet-950/50 border border-violet-500/20 text-ink-100'
-                : 'bg-ink-900/70 border border-white/5 text-ink-100',
+                : cn('bg-ink-900/70 border border-white/5 text-ink-100', tint?.bubble),
           // 031: a message sent while the agent works shows immediately, dimmed
           // until the server acks the queue (then it becomes a normal bubble).
           message.queued && 'opacity-60',
@@ -3937,6 +3953,10 @@ function ChatHeader({
   debugMode,
   debugEvents,
   approvals,
+  conversations,
+  listHidden = false,
+  onSwitch,
+  onTintChanged,
   onBack,
   onRenamed,
   onDeleted,
@@ -3950,33 +3970,26 @@ function ChatHeader({
   debugMode: boolean
   debugEvents: DebugEvent[]
   approvals: ApprovalRecord[]
+  /** 019: the full (ops-first) list — feeds the title's chat switcher. */
+  conversations: (ConversationSummary & ConvMeta)[]
+  /** 019: no conversation list beside the chat — the title grows the switcher pulldown. */
+  listHidden?: boolean
+  onSwitch: (id: string) => void
+  onTintChanged: () => void
   /** 057: mobile stack — renders a back chevron that pops to the conversation list. */
   onBack?: () => void
   onRenamed: (title: string) => void
   onDeleted: () => void
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
-  const [renaming, setRenaming] = useState(false)
-  const [draft, setDraft] = useState(activeTitle || '')
   const [copied, setCopied] = useState(false)
   const [ctxState, setCtxState] = useState<'idle' | 'busy' | 'copied'>('idle')
-  const inputRef = useRef<HTMLInputElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
-  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [switcherOpen, setSwitcherOpen] = useState(false)
+  const switcherRef = useRef<HTMLDivElement>(null)
 
-  // Escape closes the delete confirmation.
-  useEffect(() => {
-    if (!confirmDelete) return
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setConfirmDelete(false) }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [confirmDelete])
-
-  useEffect(() => {
-    if (renaming) inputRef.current?.focus()
-  }, [renaming])
-
-  // Close the menu on outside click. A document listener is immune to
+  // Close the menus on outside click. A document listener is immune to
   // z-index/stacking-context bugs that a backdrop overlay div is prone to
   // (an overlay above the menu silently swallows every click).
   useEffect(() => {
@@ -3988,20 +4001,19 @@ function ChatHeader({
     return () => document.removeEventListener('mousedown', onDown)
   }, [menuOpen])
 
-  async function doRename() {
-    const t = draft.trim()
-    if (!t || !activeId) { setRenaming(false); return }
-    await api.renameConversation(activeId, t)
-    onRenamed(t)
-    setRenaming(false)
-  }
-
-  async function doDelete() {
-    if (!activeId) return
-    setConfirmDelete(false)
-    await api.deleteConversation(activeId)
-    onDeleted()
-  }
+  useEffect(() => {
+    if (!switcherOpen) return
+    const onDown = (e: MouseEvent) => {
+      if (switcherRef.current && !switcherRef.current.contains(e.target as Node)) setSwitcherOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setSwitcherOpen(false) }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [switcherOpen])
 
   async function doCopy() {
     // 005.913: copy is *context-aware*. With debug mode off, the user gets
@@ -4081,7 +4093,53 @@ function ChatHeader({
         <div className="text-xl grid place-items-center">
           <AgentAvatar avatarUrl={identity?.avatar_url} emoji={identity?.emoji || '🌙'} displaySize={28} priority imgClassName="w-7 h-7 rounded-lg object-cover" />
         </div>
-        <div className="font-medium text-ink-100" data-testid="chat-header-agent-name">{agentName(identity)}</div>
+        {/* 019: the title slot names the CHAT, not the agent (the agent's name
+            lives in the sidebar/app chrome). With no conversation list beside
+            the chat, the title becomes the switcher pulldown. */}
+        {listHidden && conversations.length > 0 ? (
+          <div className="relative min-w-0" ref={switcherRef}>
+            <button
+              onClick={() => setSwitcherOpen((v) => !v)}
+              data-testid="chat-switcher-btn"
+              className="flex items-center gap-1 font-medium text-ink-100 hover:text-white transition min-w-0 max-w-full"
+              title="Switch chat"
+            >
+              <span className="truncate">{(activeTitle || '').trim() || 'New conversation'}</span>
+              <ChevronDown className={cn('w-4 h-4 text-ink-400 shrink-0 transition-transform', switcherOpen && 'rotate-180')} />
+            </button>
+            {switcherOpen && (
+              <div
+                data-testid="chat-switcher-menu"
+                className="absolute left-0 top-full z-[100] mt-1 w-64 max-h-80 overflow-y-auto rounded-lg bg-ink-800 py-1 shadow-xl border border-white/10"
+              >
+                {conversations.map((c) => (
+                  <button
+                    key={c.id}
+                    data-testid="chat-switcher-item"
+                    onClick={() => {
+                      setSwitcherOpen(false)
+                      if (c.id !== activeId) onSwitch(c.id)
+                    }}
+                    className={cn(
+                      'w-full flex items-center gap-1.5 px-3 py-2 text-sm text-left hover:bg-white/10 min-w-0',
+                      c.id === activeId ? 'text-ink-50' : 'text-ink-200',
+                    )}
+                  >
+                    <span className="truncate">{c.title || 'New conversation'}</span>
+                    {convKind(c) === 'ops' && (
+                      <span className="shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">OPS</span>
+                    )}
+                    {c.id === activeId && <Check className="w-3.5 h-3.5 ml-auto shrink-0 text-luna-300" />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="font-medium text-ink-100 truncate" data-testid="chat-header-title">
+            {(activeTitle || '').trim() || 'New conversation'}
+          </div>
+        )}
         {/* 089: the open chat is an ops conversation — say so where the eye
             already is. Amber = attention; same chip anatomy as `debug`. */}
         {activeOps && (
@@ -4092,25 +4150,7 @@ function ChatHeader({
         )}
       </div>
 
-      {renaming ? (
-        <div className="flex items-center gap-1">
-          <input
-            ref={inputRef}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') doRename(); if (e.key === 'Escape') setRenaming(false) }}
-            className="rounded bg-ink-800 px-2 py-1 text-sm text-ink-100 outline-none border border-luna-500/30 w-56"
-            placeholder="Conversation title"
-          />
-          <button onClick={doRename} className="p-1 text-emerald-400 hover:text-emerald-300" title="Save">
-            <Check className="w-4 h-4" />
-          </button>
-          <button onClick={() => setRenaming(false)} className="p-1 text-ink-400 hover:text-ink-200" title="Cancel">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      ) : (
-        activeId && (
+      {activeId && (
           <div className="relative" ref={menuRef}>
             <button
               onClick={() => setMenuOpen((v) => !v)}
@@ -4151,35 +4191,29 @@ function ChatHeader({
                     )}
                     {ctxState === 'copied' ? 'Copied!' : ctxState === 'busy' ? 'Fetching context…' : 'Copy agent context'}
                   </button>
+                  {/* 019: rename, message color, and delete live together in
+                      the Chat settings dialog. */}
                   <button
-                    onClick={() => { setMenuOpen(false); setDraft(activeTitle || ''); setRenaming(true) }}
+                    onClick={() => { setMenuOpen(false); setSettingsOpen(true) }}
                     className="w-full flex items-center gap-2 px-3 py-2 text-sm text-ink-200 hover:bg-white/10"
-                    data-testid="chat-header-rename"
+                    data-testid="chat-header-settings"
                   >
-                    <Pencil className="w-3.5 h-3.5" /> Rename
+                    <Settings className="w-3.5 h-3.5" /> Chat settings
                   </button>
-                  {/* 089: ops conversations can't be deleted (the server 403s
-                      the DELETE) — no dead affordance, the item is absent. */}
-                  {!activeOps && (
-                    <button
-                      onClick={() => { setMenuOpen(false); setConfirmDelete(true) }}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-rose-400 hover:bg-white/10"
-                      data-testid="chat-header-delete"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" /> Delete
-                    </button>
-                  )}
                 </div>
               </>
             )}
           </div>
-        )
       )}
-      {confirmDelete && (
-        <DeleteConversationDialog
+      {settingsOpen && activeId && (
+        <ChatSettingsDialog
+          convId={activeId}
           title={activeTitle}
-          onCancel={() => setConfirmDelete(false)}
-          onConfirm={doDelete}
+          ops={activeOps}
+          onClose={() => setSettingsOpen(false)}
+          onRenamed={onRenamed}
+          onDeleted={onDeleted}
+          onTintChanged={onTintChanged}
         />
       )}
     </div>
@@ -4234,8 +4268,167 @@ function DeleteConversationDialog({
   )
 }
 
-// Conversation sidebar item — just selection now. Rename/delete moved to
-// the chat header menu (005.917).
+// 019: per-chat settings — name, message color (tint), delete. Opened from
+// the header's "…" menu; replaces the old inline rename + Rename/Delete menu
+// items.
+function ChatSettingsDialog({
+  convId,
+  title,
+  ops,
+  onClose,
+  onRenamed,
+  onDeleted,
+  onTintChanged,
+}: {
+  convId: string
+  title: string | null
+  /** Ops chats can't be deleted (the server 403s DELETE) — no delete row. */
+  ops: boolean
+  onClose: () => void
+  onRenamed: (title: string) => void
+  onDeleted: () => void
+  onTintChanged: () => void
+}) {
+  const [draft, setDraft] = useState(title || '')
+  const [saved, setSaved] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const currentTint = chatTint(convId, ops ? 'ops' : 'building')?.id ?? null
+
+  // Escape closes the innermost layer first.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      if (confirmDelete) setConfirmDelete(false)
+      else onClose()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [confirmDelete, onClose])
+
+  async function saveName() {
+    const t = draft.trim()
+    if (!t || t === (title || '').trim()) return
+    await api.renameConversation(convId, t)
+    onRenamed(t)
+    setSaved(true)
+    setTimeout(() => setSaved(false), 1200)
+  }
+
+  function pickTint(id: TintId | null) {
+    setChatTint(convId, id)
+    onTintChanged()
+  }
+
+  async function doDelete() {
+    setConfirmDelete(false)
+    await api.deleteConversation(convId)
+    onClose()
+    onDeleted()
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 p-4"
+      onMouseDown={onClose}
+      data-testid="chat-settings-dialog"
+    >
+      <div
+        className="max-w-sm w-full rounded-2xl border border-white/10 bg-ink-900 p-5 shadow-2xl"
+        onMouseDown={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+      >
+        <h3 className="text-base font-semibold text-ink-100">Chat settings</h3>
+
+        <label className="mt-4 block text-xs font-medium uppercase tracking-wider text-ink-500">Name</label>
+        <div className="mt-1.5 flex items-center gap-2">
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') saveName() }}
+            className="flex-1 min-w-0 rounded-lg bg-ink-800 px-3 py-2 text-sm text-ink-100 outline-none border border-white/10 focus:border-luna-500/40"
+            placeholder="Chat name"
+            data-testid="chat-settings-name"
+          />
+          <button
+            onClick={saveName}
+            className={cn(
+              'px-3 py-2 rounded-lg text-sm border border-white/10 transition',
+              saved ? 'text-emerald-400' : 'text-ink-200 hover:bg-white/5',
+            )}
+            data-testid="chat-settings-save-name"
+          >
+            {saved ? <Check className="w-4 h-4" /> : 'Save'}
+          </button>
+        </div>
+
+        <label className="mt-4 block text-xs font-medium uppercase tracking-wider text-ink-500">Message color</label>
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            onClick={() => pickTint(null)}
+            title="Default"
+            aria-label="Default (no tint)"
+            className={cn(
+              'w-7 h-7 rounded-full border border-white/20 bg-ink-800 grid place-items-center transition',
+              currentTint === null && 'ring-2 ring-luna-400 ring-offset-2 ring-offset-ink-900',
+            )}
+            data-testid="chat-tint-none"
+          >
+            <X className="w-3.5 h-3.5 text-ink-400" />
+          </button>
+          {Object.values(CHAT_TINTS).map((t) => (
+            <button
+              key={t.id}
+              onClick={() => pickTint(t.id)}
+              title={t.label}
+              aria-label={`${t.label} tint`}
+              className={cn(
+                'w-7 h-7 rounded-full border border-white/20 transition',
+                t.swatch,
+                currentTint === t.id && 'ring-2 ring-luna-400 ring-offset-2 ring-offset-ink-900',
+              )}
+              data-testid={`chat-tint-${t.id}`}
+            />
+          ))}
+        </div>
+        <p className="mt-1.5 text-[11px] text-ink-500">Tints the agent&rsquo;s messages in this chat, on this device.</p>
+
+        {!ops && (
+          <div className="mt-5 pt-4 border-t border-white/10">
+            <button
+              onClick={() => setConfirmDelete(true)}
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm text-rose-400 border border-rose-500/30 hover:bg-rose-500/10 transition"
+              data-testid="chat-settings-delete"
+            >
+              <Trash2 className="w-3.5 h-3.5" /> Delete chat
+            </button>
+          </div>
+        )}
+
+        <div className="mt-5 flex justify-end">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 rounded-lg text-sm text-ink-200 border border-white/10 hover:bg-white/5 transition"
+            data-testid="chat-settings-close"
+          >
+            Done
+          </button>
+        </div>
+
+        {confirmDelete && (
+          <DeleteConversationDialog
+            title={draft.trim() || title}
+            onCancel={() => setConfirmDelete(false)}
+            onConfirm={doDelete}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Conversation sidebar item — just selection now. Rename/delete/settings moved
+// to the chat header menu (005.917, 019).
 function ConversationItem({
   conv,
   active,
@@ -4248,9 +4441,9 @@ function ConversationItem({
   /** 057: mobile list rows — 44px+ touch targets */
   big?: boolean
 }) {
-  // 089/098: ops conversations read amber (title + a very faint amber wash)
-  // and carry an OPS chip — they're the rows that watch production, pinned
-  // above the build chats. The amber border shows only while selected.
+  // 089/019: ops conversations look like every other row — the OPS chip is
+  // the only marker (the amber lives in the chat area's tint, not here).
+  // They still pin above the build chats.
   const ops = convKind(conv) === 'ops'
   return (
     <button
@@ -4260,12 +4453,8 @@ function ConversationItem({
         'w-full text-left px-3 rounded-lg text-sm transition flex items-center gap-1.5 min-w-0',
         big ? 'py-3 min-h-[44px]' : 'py-2',
         active
-          ? ops
-            ? 'bg-amber-500/10 text-amber-300 border border-amber-500/40'
-            : 'bg-luna-600/20 text-luna-100 border border-luna-500/30'
-          : ops
-            ? 'bg-amber-500/5 text-amber-300 hover:bg-amber-500/10 border border-transparent'
-            : 'text-ink-300 hover:text-ink-50 hover:bg-white/5 border border-transparent',
+          ? 'bg-luna-600/20 text-luna-100 border border-luna-500/30'
+          : 'text-ink-300 hover:text-ink-50 hover:bg-white/5 border border-transparent',
       )}
       title={conv.title || 'Untitled'}
     >

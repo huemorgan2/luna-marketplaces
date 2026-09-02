@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-// 089/014/098 — build/operate conversations. Ops conversations pin to the
-// top of the sidebar with an amber OPS treatment (amber title + a very faint
-// amber wash; the border shows only while selected) and no delete affordance
-// (the server 403s DELETE for them). The composer carries the agent-state
+// 089/014/098/019 — build/operate conversations. Ops conversations pin to
+// the top of the sidebar but look like every other row (019: the OPS chip is
+// the only marker; the amber moved into the chat area's tint) and have no
+// delete affordance (the server 403s DELETE for them; delete lives in the
+// Chat settings dialog now). The composer carries the agent-state
 // picker INSIDE the message box (014) for BUILDING chats only: a custom
 // upward menu (eyebrow header, bold label + one explanation line per option);
 // picking one PATCHes the server, and a conversation.state_changed SSE event
@@ -131,43 +132,52 @@ beforeEach(() => {
 })
 
 describe('089 ops conversations', () => {
-  it('pins ops conversations to the top with an OPS tag and amber title', async () => {
+  it('pins ops conversations to the top with an OPS tag', async () => {
     await renderPanel()
     const items = screen.getAllByTestId('conv-item')
     expect(items.length).toBe(2)
     // Server returned build first — the list still shows ops on top.
     expect(items[0].textContent).toContain('ops chat')
     expect(items[1].textContent).toContain('build chat')
-    expect(items[0].className).toContain('text-amber-300')
     expect(items[0].querySelector('[data-testid="ops-tag"]')?.textContent).toBe('OPS')
     expect(items[1].querySelector('[data-testid="ops-tag"]')).toBeNull()
   })
 
-  it('098: unselected ops row has a faint amber wash and NO amber border; selected gets both', async () => {
+  it('019: the ops row is styled exactly like every other row — no amber', async () => {
     await renderPanel()
-    // Boot selected the build chat — the ops row is inactive.
-    let opsRow = screen.getAllByTestId('conv-item').find((el) => el.textContent?.includes('ops chat'))!
-    expect(opsRow.className).toContain('bg-amber-500/5')
+    // Boot selected the build chat — both rows inactive/active generic.
+    let items = screen.getAllByTestId('conv-item')
+    let opsRow = items.find((el) => el.textContent?.includes('ops chat'))!
+    expect(opsRow.className).not.toContain('amber')
+    expect(opsRow.className).toContain('text-ink-300')
     expect(opsRow.className).toContain('border-transparent')
-    expect(opsRow.className).not.toContain('border-amber')
 
     await selectConv('ops chat')
-    opsRow = screen.getAllByTestId('conv-item').find((el) => el.textContent?.includes('ops chat'))!
-    expect(opsRow.className).toContain('border-amber-500/40')
-    expect(opsRow.className).toContain('bg-amber-500/10')
+    items = screen.getAllByTestId('conv-item')
+    opsRow = items.find((el) => el.textContent?.includes('ops chat'))!
+    const buildRow = items.find((el) => el.textContent?.includes('build chat'))!
+    // Selected ops = the same luna treatment a selected build row gets.
+    expect(opsRow.className).toContain('bg-luna-600/20')
+    expect(opsRow.className).not.toContain('amber')
+    expect(buildRow.className).toContain('text-ink-300')
+    // The OPS chip itself keeps its amber identity.
+    expect(opsRow.querySelector('[data-testid="ops-tag"]')).toBeTruthy()
   })
 
-  it('hides the delete affordance for ops conversations only', async () => {
+  it('019: delete lives in Chat settings and is absent for ops conversations', async () => {
     await renderPanel()
-    // Active = building: delete is in the header menu.
+    // Active = building: the menu offers Chat settings (no direct rename/delete).
     await act(async () => {
       fireEvent.click(screen.getByTestId('chat-header-menu-btn'))
     })
-    expect(screen.getByTestId('chat-header-delete')).toBeTruthy()
-    // Toggle it shut (fireEvent.click fires no mousedown, so the outside-click
-    // closer never ran) before switching conversations.
+    expect(screen.queryByTestId('chat-header-rename')).toBeNull()
+    expect(screen.queryByTestId('chat-header-delete')).toBeNull()
     await act(async () => {
-      fireEvent.click(screen.getByTestId('chat-header-menu-btn'))
+      fireEvent.click(screen.getByTestId('chat-header-settings'))
+    })
+    expect(screen.getByTestId('chat-settings-delete')).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('chat-settings-close'))
     })
 
     await selectConv('ops chat')
@@ -175,8 +185,11 @@ describe('089 ops conversations', () => {
     await act(async () => {
       fireEvent.click(screen.getByTestId('chat-header-menu-btn'))
     })
-    expect(screen.getByTestId('chat-header-copy')).toBeTruthy() // menu IS open
-    expect(screen.queryByTestId('chat-header-delete')).toBeNull()
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('chat-header-settings'))
+    })
+    expect(screen.getByTestId('chat-settings-dialog')).toBeTruthy() // dialog IS open
+    expect(screen.queryByTestId('chat-settings-delete')).toBeNull()
   })
 })
 
