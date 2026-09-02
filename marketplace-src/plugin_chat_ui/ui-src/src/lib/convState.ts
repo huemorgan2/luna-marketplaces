@@ -28,21 +28,24 @@ export interface StateOption {
 
 // The full state vocabulary, per kind. Labels are the human words the
 // picker shows; values are what the server stores and broadcasts.
-// luna 098: ops chats have no modes any more — they always run 'building'
-// (rows from older cores may still carry a legacy mode; convState heals it).
+// luna 099 (plan 021): the ops chat has exactly one permanent state —
+// 'identify'. It finds and reports issues; fixing happens in a regular chat.
+// One option = still no picker for ops (098 removed it). Rows from other
+// core versions may carry another value; convState heals it, but the
+// identify notice keys on the RAW row state so it never overpromises.
 export const STATE_OPTIONS: Record<ConversationKind, StateOption[]> = {
   building: [
     { value: 'planning', label: 'Planning', desc: 'Think and plan — research and notes, no building yet.' },
     { value: 'building', label: 'Building', desc: 'Full build — create and change playbooks, schedules, files.' },
   ],
   ops: [
-    { value: 'building', label: 'Building', desc: 'Full toolset — the publish gates do the enforcing.' },
+    { value: 'identify', label: 'Identify', desc: 'Finds and reports issues — fixes happen in a regular chat.' },
   ],
 }
 
 export const DEFAULT_STATE: Record<ConversationKind, string> = {
   building: 'building',
-  ops: 'building',
+  ops: 'identify',
 }
 
 /** Kind of a conversation row — anything that isn't 'ops' is 'building'. */

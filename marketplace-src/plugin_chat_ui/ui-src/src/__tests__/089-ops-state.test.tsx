@@ -281,12 +281,36 @@ describe('089 live state sync', () => {
     expect(h.patchConversationState).not.toHaveBeenCalled() // mirror, not a write
 
     // 098: a stray event for the ops chat changes nothing visible — ops chats
-    // render no state UI regardless of the stored value.
+    // render no state UI regardless of the stored value. 021: and since the
+    // raw state is no longer 'identify', the notice box withdraws too.
     await act(async () => {
       broadcast!({ conversation_id: 'o-1', kind: 'ops', state: 'fix_approve' })
     })
     await selectConv('ops chat')
     expect(screen.queryByTestId('state-pulldown')).toBeNull()
     expect(screen.queryByTestId('ops-capability-line')).toBeNull()
+    expect(screen.queryByTestId('ops-identify-notice')).toBeNull()
+  })
+})
+
+// 021 (luna 099): the ops chat is identify-only — it finds and reports
+// issues, never fixes. The standing notice under the header states that
+// contract, and keys on the RAW server state so it never promises restraint
+// a different core version does not enforce.
+describe('021 ops identify notice', () => {
+  it('shows the standing notice at the top of the ops chat — and only there', async () => {
+    await renderPanel()
+    expect(screen.queryByTestId('ops-identify-notice')).toBeNull() // building chat
+    await selectConv('ops chat')
+    const box = screen.getByTestId('ops-identify-notice')
+    expect(box.textContent).toContain('Finding issues & live activity only.')
+    expect(box.textContent).toContain('take the finding to a regular chat')
+  })
+
+  it('keys on the RAW server state — no notice when the core runs ops in another state', async () => {
+    h.conversations.mockResolvedValue([BUILD, { ...OPS, state: 'building' }])
+    await renderPanel()
+    await selectConv('ops chat')
+    expect(screen.queryByTestId('ops-identify-notice')).toBeNull()
   })
 })

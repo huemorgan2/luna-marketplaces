@@ -2486,6 +2486,11 @@ export function ChatPanel({
           }}
         />
 
+        {/* 021: the standing ops contract, gated on the RAW server state —
+            a core that runs ops in any other state gets no box, so the UI
+            never claims a restraint the server does not enforce. */}
+        {activeKind === 'ops' && activeConv?.state === 'identify' && <OpsIdentifyNotice />}
+
         {/* 011: top padding moved off the container so alerts can sit flush;
             the spacer below restores the original message offset.
             013: the feedback banner moved out — it docks onto the composer. */}
@@ -3479,6 +3484,22 @@ function Composer({
 // 0.17.0 native <select>. Closed chip: hairline neutral border; the luna
 // border shows only while the menu is open or the chip is focused. Selection
 // is the ONLY state-write trigger (never programmatic).
+// 021 (ops only): the standing notice at the top of the ops chat — the one
+// place the identify contract is stated before anything goes wrong. Rendered
+// only when the server itself reports state 'identify' (raw field, not the
+// convState fallback), so it is honest on every core version.
+function OpsIdentifyNotice() {
+  return (
+    <div
+      data-testid="ops-identify-notice"
+      className="mx-3 mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[12px] leading-snug text-amber-200/90"
+    >
+      <span className="font-semibold text-amber-200">Finding issues &amp; live activity only.</span>{' '}
+      Nothing gets fixed in this chat — to fix something, take the finding to a regular chat.
+    </div>
+  )
+}
+
 // luna 098: building chats only — ops chats lost their modes, so all the
 // ops styling, the Details expander and the capability line are gone.
 function StatePickerMenu({ kind, value, onChange }: {
