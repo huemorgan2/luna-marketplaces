@@ -2539,7 +2539,10 @@ export function ChatPanel({
 
   const chatArea = (
     <ChatTintContext.Provider value={activeTint}>
-    <div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
+    {/* 0.29.2: the tint washes the WHOLE chat column — header to composer —
+        so the color truly fills the surface instead of stopping at the
+        scroll pane's edges. */}
+    <div className={cn('flex-1 flex flex-col min-w-0 min-h-0 relative', activeTint?.area)} data-testid="chat-area">
         <ChatHeader
           identity={identity}
           activeId={activeId}
@@ -2582,7 +2585,7 @@ export function ChatPanel({
             0.29.1: the big top spacer shrank to a hairline — messages sit
             flush under the header/notice, no dark band above the first bubble.
             013: the feedback banner moved out — it docks onto the composer. */}
-        <div ref={scrollRef} onScroll={handleScroll} className={cn('flex-1 overflow-y-auto overflow-x-hidden overscroll-contain', dense ? 'px-3 pb-3' : 'px-6 pb-6', activeTint?.area)} data-testid="chat-scroll-pane">
+        <div ref={scrollRef} onScroll={handleScroll} className={cn('flex-1 overflow-y-auto overflow-x-hidden overscroll-contain', dense ? 'px-3 pb-3' : 'px-6 pb-6')} data-testid="chat-scroll-pane">
           <div aria-hidden className="h-2" />
           {loadingMessages && (
             <div className="flex items-center justify-center py-12 text-ink-400 text-sm gap-2">

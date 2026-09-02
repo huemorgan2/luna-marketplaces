@@ -22,31 +22,31 @@ export interface ChatTintDef {
 export const CHAT_TINTS: Record<TintId, ChatTintDef> = {
   amber: {
     id: 'amber', label: 'Amber',
-    area: 'bg-amber-500/10',
+    area: 'bg-amber-500/15',
     bubble: 'bg-amber-950/45 border-amber-500/15',
     swatch: 'bg-amber-400',
   },
   sky: {
     id: 'sky', label: 'Sky',
-    area: 'bg-sky-500/10',
+    area: 'bg-sky-500/15',
     bubble: 'bg-sky-950/45 border-sky-500/15',
     swatch: 'bg-sky-400',
   },
   emerald: {
     id: 'emerald', label: 'Emerald',
-    area: 'bg-emerald-500/10',
+    area: 'bg-emerald-500/15',
     bubble: 'bg-emerald-950/45 border-emerald-500/15',
     swatch: 'bg-emerald-400',
   },
   violet: {
     id: 'violet', label: 'Violet',
-    area: 'bg-violet-500/10',
+    area: 'bg-violet-500/15',
     bubble: 'bg-violet-950/45 border-violet-500/15',
     swatch: 'bg-violet-400',
   },
   rose: {
     id: 'rose', label: 'Rose',
-    area: 'bg-rose-500/10',
+    area: 'bg-rose-500/15',
     bubble: 'bg-rose-950/45 border-rose-500/15',
     swatch: 'bg-rose-400',
   },

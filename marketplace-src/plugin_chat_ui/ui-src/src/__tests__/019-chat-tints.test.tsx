@@ -77,7 +77,7 @@ const OPS = {
 }
 
 function pane(): HTMLElement {
-  return screen.getByTestId('chat-scroll-pane')
+  return screen.getByTestId('chat-area')
 }
 
 /** The bubble div wrapping a rendered assistant message. */
@@ -135,13 +135,13 @@ describe('019 chat tints', () => {
   it('ops chats default to the amber tint: pane wash + tinted plain bubbles', async () => {
     await renderPanel()
     // The building chat is untinted.
-    expect(pane().className).not.toContain('bg-amber-500/10')
+    expect(pane().className).not.toContain('bg-amber-500/15')
     await waitFor(() => expect(screen.getByText('build reply')).toBeTruthy())
     expect(bubbleOf('build reply').className).toContain('bg-ink-900/70')
 
     await selectConv('ops chat')
     await waitFor(() => expect(screen.getByText('ops reply')).toBeTruthy())
-    expect(pane().className).toContain('bg-amber-500/10')
+    expect(pane().className).toContain('bg-amber-500/15')
     const bubble = bubbleOf('ops reply')
     expect(bubble.className).toContain('bg-amber-950/45')
     expect(bubble.className).toContain('border-amber-500/15')
@@ -154,7 +154,7 @@ describe('019 chat tints', () => {
       fireEvent.click(screen.getByTestId('chat-tint-sky'))
     })
     expect(localStorage.getItem('luna.chat.tint.b-1')).toBe('sky')
-    expect(pane().className).toContain('bg-sky-500/10')
+    expect(pane().className).toContain('bg-sky-500/15')
     await waitFor(() => expect(screen.getByText('build reply')).toBeTruthy())
     expect(bubbleOf('build reply').className).toContain('bg-sky-950/45')
   })
@@ -163,7 +163,7 @@ describe('019 chat tints', () => {
     await renderPanel()
     await selectConv('ops chat')
     await waitFor(() => expect(h.messages).toHaveBeenCalledWith('o-1'))
-    expect(pane().className).toContain('bg-amber-500/10')
+    expect(pane().className).toContain('bg-amber-500/15')
     await openSettings()
     // The effective tint (amber) shows as selected before any pick.
     expect(screen.getByTestId('chat-tint-amber').className).toContain('ring-2')
@@ -171,7 +171,7 @@ describe('019 chat tints', () => {
       fireEvent.click(screen.getByTestId('chat-tint-none'))
     })
     expect(localStorage.getItem('luna.chat.tint.o-1')).toBe('none')
-    expect(pane().className).not.toContain('bg-amber-500/10')
+    expect(pane().className).not.toContain('bg-amber-500/15')
   })
 
   it('tints never touch user/reflection/automation bubbles', async () => {
