@@ -1964,6 +1964,37 @@ export function ChatPanel({
       return
     }
 
+    // 020: /reset — reset the model's working context; the transcript stays.
+    // A command, not a message: nothing is sent to the agent.
+    if (text === '/reset') {
+      if (!fromBridge) setInput('')
+      const rstConvId = activeIdRef.current
+      if (!rstConvId) {
+        addSystemLine(null, 'Nothing to reset — no conversation yet.')
+        return
+      }
+      if (streaming || condensing) {
+        addSystemLine(rstConvId, 'Busy — wait for the current turn to finish, then retry /reset.')
+        return
+      }
+      patchTurn(rstConvId, { condensing: true })
+      try {
+        const r = await api.resetContext(rstConvId)
+        if (r.context && activeIdRef.current === rstConvId) setContextStatus(r.context)
+        addSystemLine(rstConvId, r.reset
+          ? 'Context reset — earlier messages stay in the transcript but are no longer sent to the model.'
+          : 'Nothing to reset — the conversation has no messages.')
+      } catch (e) {
+        const msg = (e as Error).message || ''
+        addSystemLine(rstConvId, /404/.test(msg)
+          ? "This Luna doesn't support context reset yet."
+          : `Reset failed: ${msg}`)
+      } finally {
+        patchTurn(rstConvId, { condensing: false })
+      }
+      return
+    }
+
     // 031: while a turn is running, sending is WhatsApp-style — the message
     // shows as a normal bubble immediately and is queued server-side. The
     // running turn breaks at the next node boundary and a follow-up turn ingests
@@ -2447,6 +2478,11 @@ export function ChatPanel({
             if (isMobile) setActiveId(null)
             else if (rest.length) selectConversation(rest[0].id)
             else newConversation()
+          }}
+          onReset={(ctx) => {
+            // 020: refresh the context gauge and note the reset in the transcript.
+            if (ctx) setContextStatus(ctx)
+            addSystemLine(activeId, 'Context reset — earlier messages stay in the transcript but are no longer sent to the model.')
           }}
         />
 
@@ -3960,6 +3996,7 @@ function ChatHeader({
   onBack,
   onRenamed,
   onDeleted,
+  onReset,
 }: {
   identity: Identity | null
   activeId: string | null
@@ -3980,6 +4017,8 @@ function ChatHeader({
   onBack?: () => void
   onRenamed: (title: string) => void
   onDeleted: () => void
+  /** 020: context was reset from Chat settings — carries the fresh gauge payload. */
+  onReset: (ctx: ContextStatus | null) => void
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -4214,6 +4253,7 @@ function ChatHeader({
           onRenamed={onRenamed}
           onDeleted={onDeleted}
           onTintChanged={onTintChanged}
+          onReset={onReset}
         />
       )}
     </div>
@@ -4279,6 +4319,7 @@ function ChatSettingsDialog({
   onRenamed,
   onDeleted,
   onTintChanged,
+  onReset,
 }: {
   convId: string
   title: string | null
@@ -4288,10 +4329,15 @@ function ChatSettingsDialog({
   onRenamed: (title: string) => void
   onDeleted: () => void
   onTintChanged: () => void
+  /** 020: context was reset — carries the fresh context gauge payload. */
+  onReset: (ctx: ContextStatus | null) => void
 }) {
   const [draft, setDraft] = useState(title || '')
   const [saved, setSaved] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  // 020: two-step reset — 'idle' → 'confirm' → 'busy' → 'done'.
+  const [resetStep, setResetStep] = useState<'idle' | 'confirm' | 'busy' | 'done'>('idle')
+  const [resetError, setResetError] = useState<string | null>(null)
   const currentTint = chatTint(convId, ops ? 'ops' : 'building')?.id ?? null
 
   // Escape closes the innermost layer first.
@@ -4324,6 +4370,22 @@ function ChatSettingsDialog({
     await api.deleteConversation(convId)
     onClose()
     onDeleted()
+  }
+
+  // 020: reset the model's working context. Nothing is deleted — the
+  // transcript stays; the model just stops seeing the old messages.
+  async function doReset() {
+    setResetStep('busy')
+    setResetError(null)
+    try {
+      const r = await api.resetContext(convId)
+      setResetStep('done')
+      onReset(r.context ?? null)
+    } catch (e) {
+      const msg = (e as Error).message || ''
+      setResetError(/404/.test(msg) ? "This Luna doesn't support context reset yet." : msg)
+      setResetStep('idle')
+    }
   }
 
   return (
@@ -4392,6 +4454,48 @@ function ChatSettingsDialog({
           ))}
         </div>
         <p className="mt-1.5 text-[11px] text-ink-500">Tints the agent&rsquo;s messages in this chat, on this device.</p>
+
+        {/* 020: context reset — available on every chat, including ops (the
+            one chat that can't be deleted is the one that needs this most). */}
+        <label className="mt-4 block text-xs font-medium uppercase tracking-wider text-ink-500">Context</label>
+        {resetStep === 'done' ? (
+          <p className="mt-2 text-sm text-emerald-400" data-testid="chat-settings-reset-done">
+            Context reset — the transcript is untouched.
+          </p>
+        ) : resetStep === 'confirm' ? (
+          <div className="mt-2 flex items-center gap-2">
+            <button
+              onClick={doReset}
+              autoFocus
+              className="px-3 py-2 rounded-lg text-sm text-white bg-amber-600 hover:bg-amber-500 transition"
+              data-testid="chat-settings-reset-confirm"
+            >
+              Reset — keep messages
+            </button>
+            <button
+              onClick={() => setResetStep('idle')}
+              className="px-3 py-2 rounded-lg text-sm text-ink-200 border border-white/10 hover:bg-white/5 transition"
+              data-testid="chat-settings-reset-cancel"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setResetStep('confirm')}
+            disabled={resetStep === 'busy'}
+            className="mt-2 w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm text-amber-400 border border-amber-500/30 hover:bg-amber-500/10 transition disabled:opacity-50"
+            data-testid="chat-settings-reset"
+          >
+            Reset context
+          </button>
+        )}
+        {resetStep !== 'done' && (
+          <p className="mt-1.5 text-[11px] text-ink-500">
+            The agent forgets this conversation&rsquo;s history and starts fresh. Messages stay in the transcript.
+          </p>
+        )}
+        {resetError && <p className="mt-1 text-[11px] text-rose-400" data-testid="chat-settings-reset-error">{resetError}</p>}
 
         {!ops && (
           <div className="mt-5 pt-4 border-t border-white/10">
