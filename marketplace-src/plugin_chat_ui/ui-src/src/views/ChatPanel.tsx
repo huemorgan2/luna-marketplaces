@@ -2578,11 +2578,12 @@ export function ChatPanel({
             never claims a restraint the server does not enforce. */}
         {activeKind === 'ops' && activeConv?.state === 'identify' && <OpsIdentifyNotice />}
 
-        {/* 011: top padding moved off the container so alerts can sit flush;
-            the spacer below restores the original message offset.
+        {/* 011: top padding moved off the container so alerts can sit flush.
+            0.29.1: the big top spacer shrank to a hairline — messages sit
+            flush under the header/notice, no dark band above the first bubble.
             013: the feedback banner moved out — it docks onto the composer. */}
         <div ref={scrollRef} onScroll={handleScroll} className={cn('flex-1 overflow-y-auto overflow-x-hidden overscroll-contain', dense ? 'px-3 pb-3' : 'px-6 pb-6', activeTint?.area)} data-testid="chat-scroll-pane">
-          <div aria-hidden className={dense ? 'h-3' : 'h-6'} />
+          <div aria-hidden className="h-2" />
           {loadingMessages && (
             <div className="flex items-center justify-center py-12 text-ink-400 text-sm gap-2">
               <Loader2 className="w-4 h-4 animate-spin" />
@@ -3575,11 +3576,14 @@ function Composer({
 // place the identify contract is stated before anything goes wrong. Rendered
 // only when the server itself reports state 'identify' (raw field, not the
 // convState fallback), so it is honest on every core version.
+// 0.29.1: no longer a floating rounded box — the band between the header and
+// the chat IS the notice: full-width, borderless, and the same amber wash as
+// the ops pane below it, so the two read as one flush surface.
 function OpsIdentifyNotice() {
   return (
     <div
       data-testid="ops-identify-notice"
-      className="mx-3 mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[12px] leading-snug text-amber-200/90"
+      className="bg-amber-500/10 px-4 py-2.5 text-[12px] leading-snug text-amber-200/90"
     >
       <span className="font-semibold text-amber-200">Finding issues &amp; live activity only.</span>{' '}
       Nothing gets fixed in this chat — to fix something, take the finding to a regular chat.
