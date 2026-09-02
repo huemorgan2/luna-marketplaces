@@ -232,34 +232,16 @@ function chatUrlTransform(url: string): string {
   return defaultUrlTransform(url)
 }
 
-/** Fenced code blocks get a hover-revealed copy button. Same clipboard strategy
- *  as the transcript copy: clipboard API first, execCommand fallback (the API
- *  requires document focus; execCommand doesn't). */
+/** Fenced code blocks get a hover-revealed copy button (copyToClipboard:
+ *  clipboard API first, execCommand fallback — defined near the transcript
+ *  copy menu below). */
 const PreWithCopy: Components['pre'] = ({ node: _node, children, ...props }) => {
   const preRef = useRef<HTMLPreElement>(null)
   const [copied, setCopied] = useState(false)
   async function copyBlock() {
     const text = preRef.current?.textContent ?? ''
     if (!text) return
-    let ok = false
-    try {
-      await navigator.clipboard.writeText(text)
-      ok = true
-    } catch {
-      try {
-        const ta = document.createElement('textarea')
-        ta.value = text
-        ta.style.position = 'fixed'
-        ta.style.opacity = '0'
-        document.body.appendChild(ta)
-        ta.select()
-        ok = document.execCommand('copy')
-        document.body.removeChild(ta)
-      } catch {
-        ok = false
-      }
-    }
-    if (ok) {
+    if (await copyToClipboard(text)) {
       setCopied(true)
       setTimeout(() => setCopied(false), 1200)
     }
@@ -285,11 +267,110 @@ const PreWithCopy: Components['pre'] = ({ node: _node, children, ...props }) => 
   )
 }
 
+/** files-link: a root-absolute workspace file path the agent mentions (inline code
+ *  like `/findings/report.md`, or a bare-path markdown link) — requires a
+ *  file extension so slash-commands and API routes stay plain text. */
+const WORKSPACE_FILE_RE = /^\/(?:[\w.-]+\/)*[\w.-]+\.[A-Za-z0-9]{1,10}$/
+
+/** Open the Files pane revealed at `path`. Same-window post: the shell's
+ *  luna-navigate listener (Shell.tsx) switches to the files section and
+ *  forwards the target into the plugin iframe over the ui-ready bridge. */
+function openInFiles(path: string) {
+  window.postMessage(
+    { type: 'luna-navigate', section: 'files', target: path },
+    window.location.origin,
+  )
+}
+
+/** A workspace file path in a chat bubble: the text opens the Files pane at
+ *  that path, and a small trailing icon copies the path. Rendered for inline
+ *  code paths (label = the path in a code chip) and bare-path markdown links
+ *  (label = the link text in an anchor). */
+function InlineFileLink({ path, anchor, children }: {
+  path: string
+  anchor?: boolean
+  children: React.ReactNode
+}) {
+  const [copied, setCopied] = useState(false)
+  async function copyPath(e: React.SyntheticEvent) {
+    e.preventDefault()
+    e.stopPropagation()
+    if (await copyToClipboard(path)) {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1200)
+    }
+  }
+  const copyBtn = (
+    <button
+      type="button"
+      onClick={copyPath}
+      aria-label="Copy path"
+      data-testid="file-path-copy"
+      title={copied ? 'Copied!' : 'Copy path'}
+      className={cn(
+        'inline-flex self-center shrink-0 p-0.5 rounded transition-colors align-middle',
+        copied ? 'text-emerald-400' : 'text-ink-500 hover:text-ink-200 hover:bg-white/10',
+      )}
+    >
+      {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+    </button>
+  )
+  if (anchor) {
+    return (
+      <span className="inline-flex items-baseline gap-0.5 max-w-full">
+        <a
+          href={path}
+          data-testid="file-path-link"
+          title="Open in Files"
+          onClick={(e) => {
+            e.preventDefault()
+            openInFiles(path)
+          }}
+        >
+          {children}
+        </a>
+        {copyBtn}
+      </span>
+    )
+  }
+  return (
+    <span className="inline-flex items-baseline gap-0.5 max-w-full">
+      <code
+        role="link"
+        tabIndex={0}
+        title="Open in Files"
+        data-testid="file-path-link"
+        onClick={() => openInFiles(path)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            openInFiles(path)
+          }
+        }}
+        className="cursor-pointer underline decoration-dotted underline-offset-2 hover:text-luna-300 transition-colors min-w-0 truncate"
+      >
+        {children}
+      </code>
+      {copyBtn}
+    </span>
+  )
+}
+
 /** Markdown renderers for assistant chat: images load eagerly (lazy breaks inside
  *  sandboxed embeds and adds nothing for an immediately-visible chat image) and
  *  degrade to alt text on error instead of a raw broken-image icon. */
 const chatMarkdownComponents: Components = {
   pre: PreWithCopy,
+  // files-link: inline code that is a workspace file path becomes a link into the
+  // Files pane. Fenced blocks pass through (their code node carries a
+  // language className and multi-node children, which the guard rejects).
+  code: ({ node: _node, children, className, ...props }) => {
+    const text = typeof children === 'string' ? children : null
+    if (text && !className && WORKSPACE_FILE_RE.test(text)) {
+      return <InlineFileLink path={text}>{text}</InlineFileLink>
+    }
+    return <code className={className} {...props}>{children}</code>
+  },
   img: ({ src, alt, ...props }) => (
     <img
       {...props}
@@ -308,7 +389,13 @@ const chatMarkdownComponents: Components = {
     />
   ),
   a: ({ href, children, ...props }) => {
-    const resolved = resolveAssetUrl(typeof href === 'string' ? href : '')
+    const raw = typeof href === 'string' ? href : ''
+    // files-link: a markdown link whose href is a bare workspace path (not an /api
+    // asset route) opens in the Files pane instead of 404ing as a page URL.
+    if (WORKSPACE_FILE_RE.test(raw) && !raw.startsWith('/api/')) {
+      return <InlineFileLink path={raw} anchor>{children}</InlineFileLink>
+    }
+    const resolved = resolveAssetUrl(raw)
     const external = /^https?:\/\//i.test(resolved) && !resolved.startsWith(window.location.origin)
     return (
       <a {...props} href={resolved} {...(external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}>
