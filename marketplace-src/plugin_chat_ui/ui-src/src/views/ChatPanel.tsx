@@ -3301,8 +3301,10 @@ function ToolRow({
         )}
       >
         {live && <Loader2 data-testid="turn-loader" className="w-3 h-3 shrink-0 animate-spin text-luna-300" />}
-        <Wrench className={cn('h-3 w-3 shrink-0', anyAwaiting ? 'text-amber-300' : anyActive && 'shimmer-icon')} />
-        <span data-testid="tool-count" className="tabular-nums">{entries.length}</span>
+        <span className="inline-flex items-center gap-1">
+          <Wrench className={cn('h-3 w-3 shrink-0', anyAwaiting ? 'text-amber-300' : anyActive && 'shimmer-icon')} />
+          <span data-testid="tool-count" className="tabular-nums">{entries.length}</span>
+        </span>
         {anyAwaiting && <span className="text-amber-300/90">waiting for approval</span>}
         <TurnTimer convKey={convKey} live={live} turnStartRef={turnStartRef} lastActivityRef={lastActivityRef} turnElapsedRef={turnElapsedRef} />
         {entries.length > 0 && (open
@@ -4991,11 +4993,18 @@ export function renderTimeline(
   return out
 }
 
-// 028.1: compact receipts for silently auto-approved tool calls. One flat
-// wrap-row of chips; repeated calls of the same tool collapse into numbered
-// tags ("Scope set #2 #3") instead of one line per call. No approval wording,
-// no link — these never asked the owner anything.
+// 028.1/022: compact receipts for silently auto-approved tool calls —
+// timeline receipts (reloads, subagent/muted turns) use the SAME grammar as
+// the live summary: a closed borderless "🔧 n ⌄" line that expands into the
+// per-cluster list, capped at 5 lines. No timer/loader — these are settled
+// history. No approval wording — these never asked the owner anything.
 function AutoToolReceipts({ calls }: { calls: { label: string; id: string }[] }) {
+  const [open, setOpen] = useState(false)
+  const listRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const el = listRef.current
+    if (open && el) el.scrollTop = el.scrollHeight
+  }, [open, calls.length])
   const clusters: { label: string; ids: string[] }[] = []
   for (const c of calls) {
     const last = clusters[clusters.length - 1]
@@ -5003,21 +5012,35 @@ function AutoToolReceipts({ calls }: { calls: { label: string; id: string }[] })
     else clusters.push({ label: c.label, ids: [c.id] })
   }
   return (
-    <div
-      data-testid="auto-tool-receipts"
-      className="flex flex-wrap items-center gap-x-3 gap-y-1 pl-11 text-[11px] leading-5 text-ink-500 fade-in"
-    >
-      {clusters.map((cl) => (
-        <span key={cl.ids[0]} className="inline-flex items-center gap-1">
+    <div data-testid="auto-tool-receipts" className="pl-11 text-[11px] leading-5 fade-in">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="inline-flex items-center gap-2 rounded-md px-1.5 py-0.5 -ml-1.5 select-none text-ink-500 transition-colors cursor-pointer hover:bg-white/5"
+      >
+        <span className="inline-flex items-center gap-1">
           <Wrench className="h-3 w-3 shrink-0" />
-          <span>{cl.label}</span>
-          {cl.ids.slice(1).map((id, i) => (
-            <span key={id} className="text-ink-600">
-              #{i + 2}
-            </span>
-          ))}
+          <span className="tabular-nums">{calls.length}</span>
         </span>
-      ))}
+        {open
+          ? <ChevronUp className="w-3 h-3 shrink-0 text-ink-600" />
+          : <ChevronDown className="w-3 h-3 shrink-0 text-ink-600" />}
+      </button>
+      {open && (
+        <div ref={listRef} className="mt-0.5 max-h-[100px] overflow-y-auto overscroll-contain pr-2 text-ink-500">
+          {clusters.map((cl) => (
+            <div key={cl.ids[0]} className="flex items-center gap-1 whitespace-nowrap">
+              <span className="truncate">{cl.label}</span>
+              {cl.ids.slice(1).map((id, i) => (
+                <span key={id} className="text-ink-600">
+                  #{i + 2}
+                </span>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
