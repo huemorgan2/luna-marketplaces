@@ -28,3 +28,13 @@ Shipped as **plugin-chat-ui 0.30.0** (commit 9036f8a).
   error-log-tracker): `/api/plugins` shows 0.30.0 enabled no-error; served
   `chat.js` carries the `tool-summary` + `shimmer-icon` markers.
   `vaselin-gamer` is stopped — upgrade it on next start.
+
+## 0.30.1 follow-up (same day)
+
+Roy's screenshot showed old-style chip wrap-rows interleaved in the timeline —
+those were `AutoToolReceipts` (persisted receipts for auto-approved calls,
+subagent/muted turns included), a separate component 0.30.0 didn't touch.
+0.30.1 (commit 7a57d8c, sha `0201dc8e…`) gives them the same collapsed
+"🔧 n ⌄" grammar with the capped expandable list (no timer/loader — settled
+history), and tightens the wrench↔count gap in both headers. Published and
+verified 0.30.1 running on the same 5 tenants.
