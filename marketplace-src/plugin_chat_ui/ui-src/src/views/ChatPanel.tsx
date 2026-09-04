@@ -1,7 +1,7 @@
 import { memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Plus, Send, Trash2, Loader2, MoreHorizontal, MoreVertical, Check, X, Copy, ChevronDown, ChevronLeft, Info, Square, Clock, Wrench, Paperclip, FileText, Brain, Zap, Hand, Settings } from 'lucide-react'
+import { Plus, Send, Trash2, Loader2, MoreHorizontal, MoreVertical, Check, X, Copy, ChevronDown, ChevronUp, ChevronLeft, Info, Square, Clock, Wrench, Paperclip, FileText, Brain, Zap, Hand, Settings } from 'lucide-react'
 import { cn } from '@luna/lib/cn'
 import { agentName, useIdentity } from '@luna/lib/identityStore'
 import {
@@ -631,6 +631,9 @@ export function ChatPanel({
   // the end-of-row indicator reads these (elapsed + "still working").
   const turnStartRef = useRef<Map<string, number>>(new Map())
   const lastActivityRef = useRef<Map<string, number>>(new Map())
+  // 022: the turn's final elapsed, frozen at stream close so the summary
+  // header keeps showing it after the turn ends; cleared when a turn starts.
+  const turnElapsedRef = useRef<Map<string, number>>(new Map())
   const noteActivity = useCallback((convId: string | null) => {
     lastActivityRef.current.set(convId ?? '', Date.now())
   }, [])
@@ -640,8 +643,11 @@ export function ChatPanel({
       streamingConvsRef.current.add(key)
       if (!turnStartRef.current.has(key)) turnStartRef.current.set(key, Date.now())
       lastActivityRef.current.set(key, Date.now())
+      turnElapsedRef.current.delete(key)
     } else {
       streamingConvsRef.current.delete(key)
+      const started = turnStartRef.current.get(key)
+      if (started != null) turnElapsedRef.current.set(key, Date.now() - started)
       turnStartRef.current.delete(key)
       lastActivityRef.current.delete(key)
     }
@@ -2603,9 +2609,9 @@ export function ChatPanel({
           )}
           <div className={cn(dense ? 'space-y-3' : 'max-w-3xl mx-auto space-y-5')}>
             {timeline}
-            {/* 016: THE in-turn tool surface — one wrap-row of chips, one per
-                call, shimmering while the tool runs and settling to grey
-                (rose on error). Stays as the turn's receipt until the next
+            {/* 016/022: THE in-turn tool surface — a collapsed summary line
+                (loader · wrench · count · timer · chevron) that expands into
+                the per-call list. Stays as the turn's receipt until the next
                 turn starts. */}
             <ToolRow
               entries={toolLog[activeId ?? ''] ?? NO_TOOL_LOG}
@@ -2613,6 +2619,7 @@ export function ChatPanel({
               convKey={activeId ?? ''}
               turnStartRef={turnStartRef}
               lastActivityRef={lastActivityRef}
+              turnElapsedRef={turnElapsedRef}
             />
             {/* 049/phase02: the ONE subagent status line — shimmer while
                 running, settles to a muted summary, never becomes a log. */}
@@ -3241,17 +3248,35 @@ function StagedChip({ item, onRemove }: { item: StagedAttachment; onRemove: () =
 // that fires 15 auto tools stays one compact line. A chip shimmers while
 // any call in its cluster is still running, then settles to grey; an error
 // turns it rose and the message rides on the title.
+// 022: the in-turn tool surface is a two-state control. Closed: one border-
+// less hover line — loader (turn alive) · wrench (shimmers while a tool runs)
+// · call counter · whole-turn timer · chevron. Open: the full list, one
+// cluster per line, capped at 5 lines and pinned to the newest call. All live
+// state (loader, shimmer, timer) lives ONLY in the header — rows carry none.
 function ToolRow({
-  entries, live, convKey, turnStartRef, lastActivityRef,
+  entries, live, convKey, turnStartRef, lastActivityRef, turnElapsedRef,
 }: {
   entries: ToolLogEntry[]
   live: boolean
   convKey: string
   turnStartRef: React.MutableRefObject<Map<string, number>>
   lastActivityRef: React.MutableRefObject<Map<string, number>>
+  turnElapsedRef: React.MutableRefObject<Map<string, number>>
 }) {
-  // 017/D2: which error chip is expanded (its message shows under the row).
+  const [open, setOpen] = useState(false)
+  // 017/D2: which error row is expanded (its message shows under the list).
   const [openErr, setOpenErr] = useState<string | null>(null)
+  const listRef = useRef<HTMLDivElement | null>(null)
+  // Collapse on conversation switch and when the log resets (next user turn).
+  const emptied = entries.length === 0
+  useEffect(() => {
+    setOpen(false)
+    setOpenErr(null)
+  }, [convKey, emptied])
+  useEffect(() => {
+    const el = listRef.current
+    if (open && el) el.scrollTop = el.scrollHeight
+  }, [open, entries.length])
   if (entries.length === 0 && !live) return null
   const clusters: { name: string; calls: ToolLogEntry[] }[] = []
   for (const e of entries) {
@@ -3259,65 +3284,88 @@ function ToolRow({
     if (last && last.name === e.name) last.calls.push(e)
     else clusters.push({ name: e.name, calls: [e] })
   }
+  const anyActive = entries.some((e) => e.status === 'running' || e.status === 'pending')
+  const anyAwaiting = entries.some((e) => e.status === 'awaiting')
   const openEntry = openErr ? entries.find((e) => e.id === openErr && e.status === 'error') : undefined
   return (
     <div data-testid="tool-row" className="pl-11 text-[11px] leading-5 fade-in">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        {clusters.map((cl) => {
-          const head = cl.calls[0]
-          const status: ToolLogStatus = cl.calls.some((c) => c.status === 'running' || c.status === 'pending')
-            ? 'running'
-            : cl.calls.some((c) => c.status === 'awaiting')
-              ? 'awaiting'
-              : cl.calls.some((c) => c.status === 'error')
-                ? 'error'
-                : cl.calls.every((c) => c.status === 'rejected')
-                  ? 'rejected'
-                  : cl.calls.every((c) => c.status === 'skipped')
-                    ? 'skipped'
-                    : 'done'
-          const errCall = cl.calls.find((c) => c.status === 'error')
-          const hint = head.hint
-          const tag =
-            status === 'awaiting' ? 'waiting for approval' : status === 'rejected' ? 'rejected' : status === 'skipped' ? 'skipped' : null
-          const shimmer = status === 'running'
-          return (
-            <span
-              key={head.id}
-              data-testid="tool-chip"
-              data-status={status}
-              title={status === 'error' && errCall?.error ? `${cl.name}: ${errCall.error}` : cl.name}
-              onClick={errCall ? () => setOpenErr((cur) => (cur === errCall.id ? null : errCall.id)) : undefined}
-              className={cn(
-                'inline-flex items-center gap-1',
-                (status === 'done' || status === 'rejected' || status === 'skipped') && 'text-ink-500',
-                status === 'error' && 'text-rose-400/90 cursor-pointer',
-                status === 'awaiting' && 'text-amber-300/90',
-              )}
-            >
-              <Wrench className={cn('h-3 w-3 shrink-0', shimmer && 'text-luna-300')} />
-              <span className={cn(shimmer && 'shimmer-text')}>{humanizeTool(cl.name)}</span>
-              {hint && (
-                <span data-testid="tool-hint" className={cn('truncate max-w-[16rem]', shimmer ? 'shimmer-text' : 'opacity-70')}>
-                  · {hint}
-                </span>
-              )}
-              {tag && <span className="opacity-80">· {tag}</span>}
-              {cl.calls.slice(1).map((c, i) => (
-                <span
-                  key={c.id}
-                  className={cn(
-                    LIVE_STATUSES.has(c.status) ? 'shimmer-text' : c.status === 'error' ? 'text-rose-400/90' : 'text-ink-600',
-                  )}
-                >
-                  #{i + 2}
-                </span>
-              ))}
-            </span>
-          )
-        })}
-        {live && <TurnLive convKey={convKey} turnStartRef={turnStartRef} lastActivityRef={lastActivityRef} />}
-      </div>
+      <button
+        type="button"
+        data-testid="tool-summary"
+        data-open={open ? 'true' : 'false'}
+        aria-expanded={open}
+        onClick={() => entries.length > 0 && setOpen((v) => !v)}
+        className={cn(
+          'inline-flex items-center gap-2 rounded-md px-1.5 py-0.5 -ml-1.5 select-none text-ink-500 transition-colors',
+          entries.length > 0 ? 'cursor-pointer hover:bg-white/5' : 'cursor-default',
+        )}
+      >
+        {live && <Loader2 data-testid="turn-loader" className="w-3 h-3 shrink-0 animate-spin text-luna-300" />}
+        <Wrench className={cn('h-3 w-3 shrink-0', anyAwaiting ? 'text-amber-300' : anyActive && 'shimmer-icon')} />
+        <span data-testid="tool-count" className="tabular-nums">{entries.length}</span>
+        {anyAwaiting && <span className="text-amber-300/90">waiting for approval</span>}
+        <TurnTimer convKey={convKey} live={live} turnStartRef={turnStartRef} lastActivityRef={lastActivityRef} turnElapsedRef={turnElapsedRef} />
+        {entries.length > 0 && (open
+          ? <ChevronUp className="w-3 h-3 shrink-0 text-ink-600" />
+          : <ChevronDown className="w-3 h-3 shrink-0 text-ink-600" />)}
+      </button>
+      {open && entries.length > 0 && (
+        <div ref={listRef} data-testid="tool-list" className="mt-0.5 max-h-[100px] overflow-y-auto overscroll-contain pr-2">
+          {clusters.map((cl) => {
+            const head = cl.calls[0]
+            const status: ToolLogStatus = cl.calls.some((c) => c.status === 'running' || c.status === 'pending')
+              ? 'running'
+              : cl.calls.some((c) => c.status === 'awaiting')
+                ? 'awaiting'
+                : cl.calls.some((c) => c.status === 'error')
+                  ? 'error'
+                  : cl.calls.every((c) => c.status === 'rejected')
+                    ? 'rejected'
+                    : cl.calls.every((c) => c.status === 'skipped')
+                      ? 'skipped'
+                      : 'done'
+            const errCall = cl.calls.find((c) => c.status === 'error')
+            const hint = head.hint
+            const tag =
+              status === 'awaiting' ? 'waiting for approval' : status === 'rejected' ? 'rejected' : status === 'skipped' ? 'skipped' : null
+            const shimmer = status === 'running'
+            return (
+              <div
+                key={head.id}
+                data-testid="tool-chip"
+                data-status={status}
+                title={status === 'error' && errCall?.error ? `${cl.name}: ${errCall.error}` : cl.name}
+                onClick={errCall ? () => setOpenErr((cur) => (cur === errCall.id ? null : errCall.id)) : undefined}
+                className={cn(
+                  'flex items-center gap-1 whitespace-nowrap',
+                  (status === 'done' || status === 'rejected' || status === 'skipped') && 'text-ink-500',
+                  status === 'running' && 'text-ink-400',
+                  status === 'error' && 'text-rose-400/90 cursor-pointer',
+                  status === 'awaiting' && 'text-amber-300/90',
+                )}
+              >
+                <span className={cn('truncate', shimmer && 'shimmer-text')}>{humanizeTool(cl.name)}</span>
+                {hint && (
+                  <span data-testid="tool-hint" className={cn('truncate max-w-[16rem]', shimmer ? 'shimmer-text' : 'opacity-70')}>
+                    · {hint}
+                  </span>
+                )}
+                {tag && <span className="opacity-80">· {tag}</span>}
+                {cl.calls.slice(1).map((c, i) => (
+                  <span
+                    key={c.id}
+                    className={cn(
+                      LIVE_STATUSES.has(c.status) ? 'shimmer-text' : c.status === 'error' ? 'text-rose-400/90' : 'text-ink-600',
+                    )}
+                  >
+                    #{i + 2}
+                  </span>
+                ))}
+              </div>
+            )
+          })}
+        </div>
+      )}
       {openEntry?.error && (
         <div data-testid="tool-error" className="mt-1 text-rose-300/80 whitespace-pre-wrap break-words">
           {openEntry.error}
@@ -3333,22 +3381,35 @@ function fmtElapsed(ms: number): string {
   return `${m}:${String(s % 60).padStart(2, '0')}`
 }
 
-// 017: THE live indicator — a spinner and the elapsed time at the end of the
-// tool row while the turn is alive. No words, unless the server has been
-// silent for STILL_WORKING_MS: then "still working" in amber (D3). Reads the
-// refs on a 1 s tick so deltas don't re-render it.
-function TurnLive({
-  convKey, turnStartRef, lastActivityRef,
+// 017/022: the whole-turn timer in the summary header. Ticks while the turn
+// is alive ("still working" in amber after STILL_WORKING_MS of silence, D3);
+// once the turn ends it shows the frozen final elapsed. The spinner lives in
+// the header's loader slot, not here. Reads the refs on a 1 s tick so deltas
+// don't re-render it.
+function TurnTimer({
+  convKey, live, turnStartRef, lastActivityRef, turnElapsedRef,
 }: {
   convKey: string
+  live: boolean
   turnStartRef: React.MutableRefObject<Map<string, number>>
   lastActivityRef: React.MutableRefObject<Map<string, number>>
+  turnElapsedRef: React.MutableRefObject<Map<string, number>>
 }) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
+    if (!live) return
     const t = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(t)
-  }, [])
+  }, [live])
+  if (!live) {
+    const frozen = turnElapsedRef.current.get(convKey)
+    if (frozen == null) return null
+    return (
+      <span data-testid="turn-live" data-stalled="false" className="tabular-nums">
+        {fmtElapsed(frozen)}
+      </span>
+    )
+  }
   const started = turnStartRef.current.get(convKey) ?? now
   const last = lastActivityRef.current.get(convKey) ?? started
   const stalled = now - last >= STILL_WORKING_MS
@@ -3356,9 +3417,8 @@ function TurnLive({
     <span
       data-testid="turn-live"
       data-stalled={stalled ? 'true' : 'false'}
-      className={cn('inline-flex items-center gap-1.5 tabular-nums', stalled ? 'text-amber-300/90' : 'text-ink-500')}
+      className={cn('inline-flex items-center gap-1.5 tabular-nums', stalled && 'text-amber-300/90')}
     >
-      <Loader2 className={cn('w-3 h-3 shrink-0 animate-spin', stalled ? 'text-amber-300' : 'text-luna-300')} />
       {stalled && <span>still working ·</span>}
       <span>{fmtElapsed(now - started)}</span>
     </span>

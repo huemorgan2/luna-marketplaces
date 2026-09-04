@@ -196,3 +196,20 @@
     color: var(--color-ink-400);
   }
 }
+
+/* 022: icon variant of the shimmer — shimmer-text is background-clip and
+   can't paint an SVG, so the wrench pulses instead while a tool runs. */
+.shimmer-icon {
+  color: var(--color-luna-200);
+  animation: iconPulse 1.6s ease-in-out infinite;
+}
+@keyframes iconPulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .shimmer-icon {
+    animation: none;
+    opacity: 1;
+  }
+}
