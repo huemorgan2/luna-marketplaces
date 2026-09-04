@@ -1549,14 +1549,9 @@ export function ChatPanel({
                 : r,
             ),
           )
-          // The requesting turn already ended (request_credential returns
-          // immediately) — continue so the agent acknowledges the outcome.
-          const convId = info.conversation_id ?? activeIdRef.current
-          if (convId && convId === activeIdRef.current && !streamingConvsRef.current.has(convId)) {
-            setTimeout(() => {
-              if (activeIdRef.current === convId) triggerContinuation(convId)
-            }, 300)
-          }
+          // luna plans/104: no client-side continuation here — the server-side
+          // vault wake (moment message) is the single resume path. Triggering
+          // from the browser too would double-fire the agent.
         },
         // 008.9: a stop was issued for this conversation (button, /stop, or any
         // other surface). Put the originating message back in the composer; for
