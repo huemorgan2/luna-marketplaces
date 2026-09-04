@@ -303,8 +303,8 @@ describe('021 ops identify notice', () => {
     expect(screen.queryByTestId('ops-identify-notice')).toBeNull() // building chat
     await selectConv('ops chat')
     const box = screen.getByTestId('ops-identify-notice')
-    expect(box.textContent).toContain('Finding issues & live activity only.')
-    expect(box.textContent).toContain('take the finding to a regular chat')
+    expect(box.textContent).toContain('Operations Channel')
+    expect(box.textContent).toContain('only identification and planning')
   })
 
   it('keys on the RAW server state — no notice when the core runs ops in another state', async () => {

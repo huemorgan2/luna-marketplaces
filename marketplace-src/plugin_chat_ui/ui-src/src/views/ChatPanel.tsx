@@ -3588,8 +3588,8 @@ function OpsIdentifyNotice() {
       data-testid="ops-identify-notice"
       className="bg-amber-500/10 px-4 py-2.5 text-[12px] leading-snug text-amber-200/90"
     >
-      <span className="font-semibold text-amber-200">Finding issues &amp; live activity only.</span>{' '}
-      Nothing gets fixed in this chat — to fix something, take the finding to a regular chat.
+      <span className="font-semibold text-amber-200">Operations Channel</span>{' '}
+      — building / fixing is not done here, only identification and planning.
     </div>
   )
 }
