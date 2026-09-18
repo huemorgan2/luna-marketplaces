@@ -12,4 +12,8 @@ The five packages were copied from the tested, committed plugin sources. The mar
 | MCP | 0.2.1 | `2e872a1` | `f9abc5c74f6688af1272d806b8e92884e1a43ea668551fce2d940dc2c990b270` |
 | Web Access | 0.3.1 | `bf1b4b1` | `0d2ed0f430f775ddbcc8032c1ef5d6b7537fc1230fcedd541f3ab7ef9dac459d` |
 
-Before release, the live official index contained 35 plugins and versions Playbooks 0.57.2, Scheduler 0.8.0, DB 0.1.0, MCP 0.2.0, and Web Access 0.3.0. The post-deploy catalog and artifact verification will be appended after deployment.
+Before release, the live official index contained 35 plugins and versions Playbooks 0.57.2, Scheduler 0.8.0, DB 0.1.0, MCP 0.2.0, and Web Access 0.3.0.
+
+## Live verification
+
+Render deploy `dep-dami3dqd0e5s73fhjba0` succeeded. The live official index still contains the same 35 plugin names. The five updated entries expose exactly the target versions and SHA-256 values above; downloading and hashing each live artifact matched its index entry. The other 30 entries retained their previous versions and hashes. The five hashes above are ready for the Luna image pin set.
