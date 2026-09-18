@@ -100,7 +100,7 @@ class WebAccessPlugin(LunaPlugin):
         shown_name="Web Access",
         icon="search",
         image="assets/icon.png",
-        version="0.2.4",
+        version="0.3.1",
         description="Web search (Tavily/Google), page fetch, and HTTP client — live internet access.",
         tools=[_WEB_SEARCH_DEF, _WEB_FETCH_DEF, _HTTP_REQUEST_DEF],
     )

@@ -22,6 +22,11 @@ from sqlalchemy import delete, select
 
 from luna_sdk import PluginContext, ToolRegistry
 
+try:  # cores with the skill system (006.0) export it
+    from luna_sdk import SkillDef
+except ImportError:  # pragma: no cover - older core: tools register ungated
+    SkillDef = None
+
 from .client import MCPClient, StdioConfig
 from .models import MCPServerRow, MCPToolRow
 from .wrapper import build_wrapped_tool, plugin_owner_name
@@ -31,6 +36,14 @@ log = logging.getLogger("plugin-mcp.manager")
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _skill_slug(server_name: str) -> str:
+    """Kebab-case a server name for use in its skill name."""
+    slug = "".join(c if c.isalnum() else "-" for c in server_name.lower())
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return slug.strip("-") or "server"
 
 
 class MCPManagerError(Exception):
@@ -47,21 +60,15 @@ class ServerManager:
         # power refresh + the built-in `mcp_list_tools`.
         self._tool_snapshot: dict[str, list[dict[str, Any]]] = {}
         self._lock = asyncio.Lock()
-        # 068/phase003: which event loop boot() last ran on (see boot()).
-        self._boot_loop_id: int | None = None
-        # 068/phase003: TTL cache of the DB rows behind list_servers — read on
-        # every turn (prompt_sections) but written only through the CRUD
-        # methods below, which all bust it. Dynamic fields (connected,
-        # tool_count) are recomputed from memory on every call.
-        self._rows_cache: tuple[float, list[dict[str, Any]]] | None = None
-        self._rows_ttl_s = 30.0
-
-    def _bust_rows_cache(self) -> None:
-        self._rows_cache = None
 
     @property
     def tool_registry(self) -> ToolRegistry:
         return self._ctx.tool_registry
+
+    @property
+    def skill_registry(self) -> Any | None:
+        """The core's skill registry, or None on cores without skills."""
+        return getattr(self._ctx, "skill_registry", None)
 
     def client_for(self, name: str) -> MCPClient | None:
         return self._clients.get(name)
@@ -69,43 +76,27 @@ class ServerManager:
     # ---------- CRUD ----------
 
     async def list_servers(self) -> list[dict[str, Any]]:
-        import time
-
-        static: list[dict[str, Any]] | None = None
-        if self._rows_cache is not None:
-            ts, cached = self._rows_cache
-            if (time.monotonic() - ts) < self._rows_ttl_s:
-                static = cached
-        if static is None:
-            async with self._ctx.db_session_factory() as s:
-                rows = (
-                    await s.execute(select(MCPServerRow).order_by(MCPServerRow.name))
-                ).scalars().all()
-                static = [
+        async with self._ctx.db_session_factory() as s:
+            rows = (await s.execute(select(MCPServerRow).order_by(MCPServerRow.name))).scalars().all()
+            out: list[dict[str, Any]] = []
+            for r in rows:
+                client = self._clients.get(r.name)
+                tool_count = len(self._tool_snapshot.get(r.name, []))
+                out.append(
                     {
                         "name": r.name,
                         "transport_type": r.transport_type,
                         "config": r.config,
                         "enabled": r.enabled,
+                        "connected": client is not None and client.connected,
+                        "tool_count": tool_count,
                         "last_connected_at": r.last_connected_at.isoformat()
                         if r.last_connected_at
                         else None,
                         "last_error": r.last_error,
                     }
-                    for r in rows
-                ]
-            self._rows_cache = (time.monotonic(), static)
-        out: list[dict[str, Any]] = []
-        for base in static:
-            client = self._clients.get(base["name"])
-            out.append(
-                {
-                    **base,
-                    "connected": client is not None and client.connected,
-                    "tool_count": len(self._tool_snapshot.get(base["name"], [])),
-                }
-            )
-        return out
+                )
+            return out
 
     async def get(self, name: str) -> dict[str, Any]:
         async with self._ctx.db_session_factory() as s:
@@ -183,7 +174,6 @@ class ServerManager:
                 session=s,
             )
             await s.commit()
-            self._bust_rows_cache()
         await self._ctx.events.emit("mcp.server_added", {"name": name})
         if enable:
             await self.enable(name, author=author)
@@ -211,7 +201,6 @@ class ServerManager:
                 session=s,
             )
             await s.commit()
-            self._bust_rows_cache()
         # If enabled, reconnect to pick up the new config.
         if name in self._clients:
             await self.disable(name, author="system")
@@ -244,7 +233,6 @@ class ServerManager:
                 session=s,
             )
             await s.commit()
-            self._bust_rows_cache()
         self._tool_snapshot.pop(name, None)
         await self._ctx.events.emit("mcp.server_removed", {"name": name})
 
@@ -338,19 +326,7 @@ class ServerManager:
     # ---------- boot/shutdown ----------
 
     async def boot(self) -> None:
-        """Connect to every enabled server on plugin load.
-
-        068/phase003: loop-aware and idempotent. `on_load` runs on a throwaway
-        bootstrap loop (luna_serve's asyncio.run), whose owner tasks die with
-        it — clients booted there are zombies on the real loop. The startup
-        hook in routes.py re-runs boot() on uvicorn's loop; the loop-id guard
-        makes a SECOND boot() on the same loop (e.g. the `luna serve` CLI path,
-        which re-boots via cli.py) a no-op instead of a reconnect storm.
-        """
-        loop_id = id(asyncio.get_running_loop())
-        if self._boot_loop_id == loop_id:
-            return
-        self._boot_loop_id = loop_id
+        """Connect to every enabled server on plugin load."""
         async with self._ctx.db_session_factory() as s:
             enabled_rows = (
                 await s.execute(select(MCPServerRow).where(MCPServerRow.enabled.is_(True)))
@@ -369,25 +345,12 @@ class ServerManager:
         await asyncio.gather(*[_try_enable(n) for n in names])
 
     async def shutdown(self) -> None:
-        """Close live clients WITHOUT persisting enabled=False.
-
-        068/phase003: the old implementation routed through disable(), which
-        writes `enabled=False` — so every process restart (CLI and ASGI alike)
-        came back with all MCP servers off until the user re-enabled them by
-        hand. Shutdown is a transport teardown, not a user intent change:
-        boot() on the next start must find the same enabled set.
-        """
-        async with self._lock:
-            names = list(self._clients.keys())
-            for n in names:
-                client = self._clients.pop(n, None)
-                self._unregister_tools(n)
-                if client is not None:
-                    try:
-                        await client.close()
-                    except Exception as e:  # noqa: BLE001
-                        log.warning("mcp shutdown close error (server=%s): %s", n, e)
-            self._boot_loop_id = None  # a fresh boot (any loop) must proceed
+        names = list(self._clients.keys())
+        for n in names:
+            try:
+                await self.disable(n, author="system", reason="shutdown")
+            except Exception as e:  # noqa: BLE001
+                log.warning("mcp shutdown error (server=%s): %s", n, e)
 
     # ---------- internals ----------
 
@@ -466,7 +429,6 @@ class ServerManager:
                     )
                 )
             await s.commit()
-            self._bust_rows_cache()
 
     async def _mark_enabled(self, name: str, *, ok: bool, clear_error: bool = True) -> None:
         async with self._ctx.db_session_factory() as s:
@@ -481,7 +443,6 @@ class ServerManager:
                 if clear_error:
                     row.last_error = None
             await s.commit()
-            self._bust_rows_cache()
 
     async def _record_error(self, name: str, msg: str) -> None:
         async with self._ctx.db_session_factory() as s:
@@ -493,7 +454,6 @@ class ServerManager:
             row.enabled = False
             row.last_error = msg[:2000]
             await s.commit()
-            self._bust_rows_cache()
         await self._ctx.events.emit("mcp.connect_failed", {"name": name, "error": msg})
 
     def _register_tools(self, server_name: str, tools: list[dict[str, Any]]) -> None:
@@ -504,10 +464,23 @@ class ServerManager:
         def _getter(name: str = server_name):
             return self._clients.get(name)
 
+        # 0.2.0: wrapped tools ride behind a per-server skill (`mcp-<server>`)
+        # so a chatty MCP server can't flood every turn's prompt with tool
+        # schemas. Cores without a skill registry get them ungated.
+        gate = self.skill_registry is not None and SkillDef is not None
+        registered: list[str] = []
         for tool in tools:
             try:
                 defn, handler = build_wrapped_tool(server_name, tool, _getter)
-                self.tool_registry.register(owner, defn, handler)
+                if gate:
+                    try:
+                        self.tool_registry.register(owner, defn, handler, skill_gated=True)
+                    except TypeError:  # core knows skills but not the kwarg
+                        gate = False
+                        self.tool_registry.register(owner, defn, handler)
+                else:
+                    self.tool_registry.register(owner, defn, handler)
+                registered.append(defn.name)
             except ValueError as e:
                 # Name collision with another tool — log and skip.
                 log.warning(
@@ -516,7 +489,43 @@ class ServerManager:
                     tool.get("name"),
                     e,
                 )
+        self._sync_skill(server_name, owner, registered if gate else [])
+
+    def _sync_skill(self, server_name: str, owner: str, tool_names: list[str]) -> None:
+        """Keep the per-server skill in step with the wrapped tools. An empty
+        tool_names drops the skill (server disabled/removed, or tools ungated)."""
+        reg = self.skill_registry
+        if reg is None or SkillDef is None:
+            return
+        try:
+            reg.unregister_plugin(owner)
+            if not tool_names:
+                return
+            reg.register(
+                owner,
+                SkillDef(
+                    name=f"mcp-{_skill_slug(server_name)}",
+                    description=(
+                        f"Tools from the '{server_name}' MCP server "
+                        f"({len(tool_names)} tools). Load BEFORE using them; "
+                        "they unlock on your next turn."
+                    ),
+                    body=(
+                        f"You now have access to the '{server_name}' MCP "
+                        "server's tools (they unlock on your NEXT turn after "
+                        "loading this skill): "
+                        + ", ".join(tool_names)
+                        + ". Call each tool with the arguments its schema "
+                        "shows. mcp_get_server_status (mcp-admin skill) "
+                        "diagnoses connection problems."
+                    ),
+                    tools=list(tool_names),
+                ),
+            )
+        except Exception as e:  # noqa: BLE001 - skills must never break tools
+            log.warning("mcp skill sync failed (server=%s): %s", server_name, e)
 
     def _unregister_tools(self, server_name: str) -> None:
         owner = plugin_owner_name(server_name)
         self.tool_registry.unregister_plugin(owner)
+        self._sync_skill(server_name, owner, [])

@@ -1,0 +1,114 @@
+# Data manifest — read by the marketplace + installer without importing Python.
+# Keep in sync with PluginManifest in __init__.py.
+
+name = "plugin-db"
+shown_name = "DB"
+version = "0.1.1"
+description = "Structured data tables (typed columns, 10k rows each) with a monday-style board: tabs, search, filters, in-place editing."
+entry = "plugin_db"
+sdk_version = "0"
+license = "MIT"
+category = "global"
+tags = ["data", "tables", "board", "database"]
+db_tables = ["db_tables", "db_columns", "db_rows"]
+readme = """
+# plugin-db
+
+Simple structured data tables for Luna — user-defined tables with typed
+columns, up to 10,000 rows each, stored durably in the agent's own Postgres.
+
+Columns are typed on top of plain primitives: text, number, status (colored
+preset states), date, checkbox, email, phone, address, currency (number +
+sign), percent. The agent gets full CRUD + search/filter tools; the DB pane is
+a monday-style board — table tabs on top, a search box and filter chips, in-
+place cell editing, resizable columns whose widths are remembered, and hover
+popups for long clipped text (no ellipsis — wider column, more data).
+"""
+
+[requires]
+tools = 14
+tables = 3
+
+[[tools]]
+name = "db_list_tables"
+description = "List every data table: id, name, description, row count."
+policy = "auto_approve"
+risk_level = "low"
+
+[[tools]]
+name = "db_get_table"
+description = "A table's schema, row count, free slots, and valid filter ops."
+policy = "auto_approve"
+risk_level = "low"
+
+[[tools]]
+name = "db_create_table"
+description = "Create a data table with typed columns (10,000-row cap)."
+policy = "auto_approve"
+risk_level = "low"
+
+[[tools]]
+name = "db_rename_table"
+description = "Rename a table or update its description."
+policy = "auto_approve"
+risk_level = "low"
+
+[[tools]]
+name = "db_delete_table"
+description = "Permanently delete a table with all its columns and rows."
+policy = "prompt_always"
+risk_level = "high"
+
+[[tools]]
+name = "db_add_column"
+description = "Add a typed column to a table."
+policy = "auto_approve"
+risk_level = "low"
+
+[[tools]]
+name = "db_update_column"
+description = "Rename, retype, reorder a column or edit its options."
+policy = "auto_approve"
+risk_level = "medium"
+
+[[tools]]
+name = "db_delete_column"
+description = "Delete a column (its cell values become unreachable)."
+policy = "prompt_always"
+risk_level = "high"
+
+[[tools]]
+name = "db_insert_rows"
+description = "Insert up to 500 validated rows (enforces the 10,000-row cap)."
+policy = "auto_approve"
+risk_level = "medium"
+
+[[tools]]
+name = "db_update_rows"
+description = "Update cells on existing rows by row id."
+policy = "auto_approve"
+risk_level = "medium"
+
+[[tools]]
+name = "db_delete_rows"
+description = "Delete rows by id."
+policy = "ask"
+risk_level = "high"
+
+[[tools]]
+name = "db_get_row"
+description = "Read one row by id."
+policy = "auto_approve"
+risk_level = "low"
+
+[[tools]]
+name = "db_query"
+description = "Search, filter, sort, and paginate rows of one table."
+policy = "auto_approve"
+risk_level = "low"
+
+[[tools]]
+name = "db_count"
+description = "Count matching rows, with per-status breakdowns."
+policy = "auto_approve"
+risk_level = "low"

@@ -5,42 +5,731 @@ templates of steps that Luna builds through conversation and executes
 on triggers or on demand.
 """
 
+import logging
+import asyncio
+import json
+import uuid
+from datetime import datetime, timezone
+
 from luna_sdk import LunaPlugin, PluginContext, PluginManifest, SidebarSection, SkillDef
 
-# 068/phase003: prompt_sections runs every turn but playbooks change only via
-# the authoring routes/tools. Factory-scoped TTL cache + explicit busts from
-# every status write (routes.py / agent_tools.py call bust_sections_cache).
-_SECTIONS_CACHE_ATTR = "_luna_playbooks_sections_cache"
-_SECTIONS_TTL_S = 30.0
+from .v2.skill import V2_SKILL_BODY
+
+logger = logging.getLogger(__name__)
 
 
-def _sections_cache_get(sf) -> list[str] | None:
-    import time
+# Columns added after a table first shipped. `table.create(checkfirst=True)`
+# skips existing tables entirely, so these need explicit ALTERs. Additive,
+# SQLite/PG-safe DDL only.
+_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
+    # (table, column, DDL type suffix)
+    ("playbooks", "code", "TEXT"),                        # 0.8.0
+    ("playbook_versions", "code", "TEXT"),                # 0.8.0
+    ("playbooks", "manifest", "TEXT NOT NULL DEFAULT ''"),          # 0.9.0
+    ("playbook_versions", "manifest", "TEXT NOT NULL DEFAULT ''"),  # 0.9.0
+    ("playbooks", "live_version", "INTEGER NOT NULL DEFAULT 0"),    # 0.10.0
+    ("playbooks", "candidate_version", "INTEGER"),                  # 0.10.0
+    ("playbooks", "failures_acked_version", "INTEGER"),             # 0.21.0
+    # 0.26.0 (plans/015, 089): build/operate split
+    ("playbooks", "publish_autonomy", "VARCHAR(16) NOT NULL DEFAULT 'ask'"),
+    ("playbook_runs", "report_to", "UUID"),
+    ("playbook_runs", "is_test", "BOOLEAN NOT NULL DEFAULT FALSE"),
+    # 0.28.0 (plans/016 phase 6): switchable publish gate
+    ("playbooks", "publish_require_run", "BOOLEAN NOT NULL DEFAULT TRUE"),
+    # 0.44.0 (plans/028): wake-on-completion promise flag
+    ("playbook_runs", "wake_on_complete", "BOOLEAN NOT NULL DEFAULT FALSE"),
+    # plans/032 phase 02 (docs/v2.md §7): run-level error contract
+    ("playbook_runs", "error", "TEXT"),
+    ("playbook_runs", "error_type", "VARCHAR(64)"),
+    ("playbook_runs", "traceback", "TEXT"),
+    ("playbook_runs", "failed_at", "TIMESTAMP"),
+    # plans/032 phase 04: the playbook's language (pblang | python)
+    ("playbooks", "format", "VARCHAR(16) NOT NULL DEFAULT 'pblang'"),
+    # plans/032 phase 07: parked runs — `parked_on` on the run row and on the
+    # parking journal entry. First JSON-typed entry: SQLite takes any type name
+    # (affinity NUMERIC, the JSON type serialises to text), PG gets `jsonb`
+    # matching the model's `JSONB` column.
+    ("playbook_runs", "parked_on", "JSONB"),
+    ("playbook_journal", "parked_on", "JSONB"),
+    # plans/032 phase 08: format per version row and per run; the run's
+    # `result` (what `run()` returned). Backfilled by `backfill_format`.
+    ("playbook_versions", "format", "VARCHAR(16) NOT NULL DEFAULT 'pblang'"),
+    ("playbook_runs", "format", "VARCHAR(16) NOT NULL DEFAULT 'pblang'"),
+    ("playbook_runs", "result", "JSONB"),
+    # plans/034 (0.57.0): the loop guard's memory of the last approval card
+    # per playbook (see publish_guard.py). All nullable, no backfill.
+    ("playbooks", "last_card_action", "VARCHAR(16)"),
+    ("playbooks", "last_card_version", "INTEGER"),
+    ("playbooks", "last_card_approval_id", "VARCHAR(64)"),
+    ("playbooks", "last_card_raised_at", "TIMESTAMP"),
+    ("playbooks", "last_card_decision", "VARCHAR(16)"),
+    ("playbooks", "last_card_decided_at", "TIMESTAMP"),
+]
 
-    cached = getattr(sf, _SECTIONS_CACHE_ATTR, None)
-    if cached is None:
-        return None
-    ts, sections = cached
-    if (time.monotonic() - ts) >= _SECTIONS_TTL_S:
-        return None
-    return list(sections)
+# plans/032 phase 08: SQL run ONCE, in the same transaction that adds the
+# column. Rows that predate `format` on the row tables all shared their
+# playbook's language, so the parent's column is the truth for them — the
+# DDL default (`pblang`) is wrong for a python playbook's history. This
+# never runs again: after phase 08 an edit may mint a pblang candidate
+# under a python playbook (test_v2_format_tools.py::test_edit_may_change_format),
+# and a load-time rewrite would flip that legitimate row.
+_POST_ADD_SQL: dict[tuple[str, str], str] = {
+    ("playbook_versions", "format"): (
+        "UPDATE playbook_versions SET format = 'python' WHERE playbook_id IN "
+        "(SELECT id FROM playbooks WHERE format = 'python')"
+    ),
+    ("playbook_runs", "format"): (
+        "UPDATE playbook_runs SET format = 'python' WHERE playbook_id IN "
+        "(SELECT id FROM playbooks WHERE format = 'python')"
+    ),
+}
+
+# Indexes whose definition changed — dropped on load so the model's current
+# index (a different name) can be created next to them without conflicts.
+_LEGACY_INDEXES: list[tuple[str, str]] = [
+    # (table, index name)
+]
 
 
-def _sections_cache_put(sf, sections: list[str]) -> None:
-    import time
+async def _ensure_columns(engine) -> None:
+    """Add late-added columns to installs that predate them."""
+    from sqlalchemy import inspect, text
 
-    try:
-        setattr(sf, _SECTIONS_CACHE_ATTR, (time.monotonic(), list(sections)))
-    except Exception:  # noqa: BLE001 — cache is best-effort
-        pass
+    def _missing(sync_conn):
+        insp = inspect(sync_conn)
+        cols = {
+            t: {c["name"] for c in insp.get_columns(t)}
+            for t in {t for t, _, _ in _COLUMN_MIGRATIONS}
+        }
+        return [
+            (t, col, ddl) for t, col, ddl in _COLUMN_MIGRATIONS
+            if col not in cols[t]
+        ]
+
+    async with engine.begin() as conn:
+        for table, col, ddl in await conn.run_sync(_missing):
+            await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))
+            logger.info("playbooks: added %s column to %s", col, table)
+            post = _POST_ADD_SQL.get((table, col))
+            if post:
+                n = (await conn.execute(text(post))).rowcount
+                logger.info(
+                    "playbooks: %s.%s inherited from the playbook on %d row(s)",
+                    table, col, n if n is not None and n >= 0 else 0,
+                )
 
 
-def bust_sections_cache(sf) -> None:
-    """Invalidate the cached prompt section (call after any playbook write)."""
-    try:
-        delattr(sf, _SECTIONS_CACHE_ATTR)
-    except Exception:  # noqa: BLE001
-        pass
+async def _drop_legacy_indexes(engine) -> None:
+    """Drop indexes the model no longer declares (see _LEGACY_INDEXES)."""
+    from sqlalchemy import inspect, text
+
+    def _present(sync_conn):
+        insp = inspect(sync_conn)
+        return [
+            (t, name) for t, name in _LEGACY_INDEXES
+            if any(ix["name"] == name for ix in insp.get_indexes(t))
+        ]
+
+    async with engine.begin() as conn:
+        for table, name in await conn.run_sync(_present):
+            await conn.execute(text(f"DROP INDEX {name}"))
+            logger.info("playbooks: dropped legacy index %s on %s", name, table)
+
+
+async def _drop_spec_remnants(engine) -> None:
+    """0.47.0: the stored-tests feature was removed — drop its table and
+    the `playbooks.publish_require_specs` column from installs that still
+    carry them. Idempotent: a fresh install (or a second load) finds nothing
+    and does nothing. Row counts are logged before the drop so the upgrade
+    leaves a record of what it discarded."""
+    from sqlalchemy import inspect, text
+
+    def _present(sync_conn):
+        insp = inspect(sync_conn)
+        has_table = insp.has_table("playbook_specs")
+        has_col = insp.has_table("playbooks") and any(
+            c["name"] == "publish_require_specs"
+            for c in insp.get_columns("playbooks")
+        )
+        return has_table, has_col
+
+    async with engine.begin() as conn:
+        has_table, has_col = await conn.run_sync(_present)
+        if not has_table and not has_col:
+            return
+        spec_rows = 0
+        if has_table:
+            spec_rows = (await conn.execute(
+                text("SELECT COUNT(*) FROM playbook_specs")
+            )).scalar() or 0
+        relaxed = 0
+        if has_col:
+            relaxed = (await conn.execute(
+                text("SELECT COUNT(*) FROM playbooks WHERE NOT publish_require_specs")
+            )).scalar() or 0
+        logger.info(
+            "playbooks: dropping playbook_specs (%d rows) and "
+            "playbooks.publish_require_specs (%d rows false) — feature "
+            "removed in 0.47.0", spec_rows, relaxed,
+        )
+        if has_table:
+            await conn.execute(text("DROP TABLE IF EXISTS playbook_specs"))
+        if has_col:
+            await conn.execute(
+                text("ALTER TABLE playbooks DROP COLUMN publish_require_specs")
+            )
+
+
+async def backfill_code(session_factory) -> int:
+    """Store pblang code for every playbook that has none.
+
+    Each backfill is verified — the generated code must compile back to the
+    exact same definition, else the row is skipped (code stays NULL and is
+    derived on read). Returns the number of rows backfilled.
+    """
+    from sqlalchemy import select
+
+    from .definition import PlaybookDef
+    from .models import Playbook
+    from .pblang import compile_playbook, defs_equal, generate_code
+
+    filled = 0
+    async with session_factory() as session:
+        rows = (await session.execute(
+            select(Playbook).where(
+                Playbook.code.is_(None),
+                # plans/032 phase 04: python rows carry code by construction
+                # and their definition is a checker summary, not a PlaybookDef
+                Playbook.format != "python",
+            )
+        )).scalars().all()
+        for pb in rows:
+            try:
+                d = PlaybookDef.model_validate(pb.definition)
+                code = generate_code(d)
+                if defs_equal(d, compile_playbook(code)):
+                    pb.code = code
+                    filled += 1
+                else:
+                    logger.warning(
+                        "playbooks: codegen round-trip drift for '%s' — "
+                        "leaving code NULL", pb.name,
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "playbooks: could not backfill code for '%s': %s",
+                    pb.name, e,
+                )
+        if filled:
+            await session.commit()
+    if filled:
+        logger.info("playbooks: backfilled pblang code for %d playbook(s)", filled)
+    return filled
+
+
+async def backfill_live_version(session_factory) -> int:
+    """0.10.0 (plans/002 phase 3): pin `live_version` on pre-0.10 rows.
+
+    0 means "same as version"; make that explicit so every reader can trust
+    `live_version` directly. Idempotent. Returns the number of rows updated.
+
+    plans/032 phase 04: a row that carries `candidate_version` with
+    `live_version == 0` has NO live version (propose saved a candidate) —
+    a restart must never promote it, so those rows are left alone.
+    """
+    from sqlalchemy import update
+
+    from .models import Playbook
+
+    async with session_factory() as session:
+        result = await session.execute(
+            update(Playbook)
+            .where(Playbook.live_version == 0, Playbook.candidate_version.is_(None))
+            .values(live_version=Playbook.version)
+        )
+        await session.commit()
+    n = result.rowcount or 0
+    if n:
+        logger.info("playbooks: backfilled live_version for %d playbook(s)", n)
+    return n
+
+
+async def backfill_format(session_factory) -> int:
+    """plans/032 phase 08: defensive — a version row or run row that somehow
+    carries NULL `format` reads `pblang` so it never dispatches on nothing.
+    (`UPDATE ... SET format='pblang' WHERE format IS NULL`, both tables.)
+    The one-time inheritance of a python playbook's format by its pre-phase-08
+    rows happens in `_ensure_columns` when the column is added
+    (`_POST_ADD_SQL`), never here: a load must not rewrite a row whose
+    language legitimately differs from its playbook's. Idempotent. Returns
+    rows updated."""
+    from sqlalchemy import update
+
+    from .models import PlaybookRun, PlaybookVersion
+
+    total = 0
+    async with session_factory() as session:
+        for model in (PlaybookVersion, PlaybookRun):
+            result = await session.execute(
+                update(model)
+                .where(model.format.is_(None))
+                .values(format="pblang")
+                .execution_options(synchronize_session=False)
+            )
+            total += result.rowcount or 0
+        await session.commit()
+    if total:
+        logger.info("playbooks: backfilled NULL format for %d version/run row(s)", total)
+    return total
+
+
+# 0.8.0 (plans/002 phase 1): the authoring skill teaches playbook CODE —
+# the restricted-Python language compiled by pblang. Both examples are
+# compile-verified in tests/test_pblang.py (test_skill_examples_compile).
+_AUTHORING_SKILL_BODY = '''\
+## Playbook Authoring
+
+A playbook is written in playbook CODE — a restricted Python dialect. You
+WRITE code; Luna PARSES and COMPILES it into a step graph. It NEVER runs
+as Python: no imports, no class, no Python for/while/if, no
+comprehensions; the only callables are the combinators, range(), and your
+top-level `def` functions (compile-time macros). Each
+statement is ONE step: `<id> = combinator(...)` — the variable name is the
+step id. EXACT SYNTAX (signatures, loop kwargs, state ops, filters) is one
+call away: `playbook_language_reference` — never guess.
+
+### THE LOOP — build a playbook like you write code
+Never run blind:
+0. OUTLINE FIRST — write the decomposition as one line per step:
+`id -> kind -> the SINGLE operation`. Self-check: (a) any line with a
+quantifier (each/all/every) MUST be a `loop`; (b) no single step may carry
+the whole task; (c) each `agent()`/`llm()` is ONE judgment on ONE thing.
+Only then write code.
+1. WRITE: `playbook_propose(name, code=...)` to create — it saves a
+CANDIDATE (validated, not live): nothing runs via triggers or
+`playbook_run` until `playbook_publish`. Edit via the two-step ticket
+flow — see MANIFEST + THE EDIT FLOW below.
+2. COMPILE: `playbook_validate(code=... | name=...)` — ALL errors at once
+(line numbers, undefined refs, unknown tools, bad loops, cycles).
+3. TEST: `playbook_dry_run(name, inputs)` — simulates the run with tool/LLM
+steps STUBBED: proves loops iterate, branches branch, templates resolve — no
+side effects. Exercises the CANDIDATE by default. Outputs are SIMULATED: NEVER
+report a dry-run value as a real result. Copy your `steps.<id>.<field>`
+paths from its `references`. The trace's per-step `output` key is JUST a
+label — `steps.<id>.output.<field>` does not exist.
+4. RUN: `playbook_run(name, inputs)` for real. Runs execute in the
+background: on 'running', poll `playbook_status(run_id)` until
+'done'/'failed'; never re-run a 'running' playbook or invent results.
+Report a run by its `kind` and `version` — 'real run of v3', 'candidate
+test run of v4', 'dry run of v4 — simulated'. A dry run is never 'a run'.
+`playbook_overview(name)` is the truth surface — read it before describing
+a playbook's state.
+5. INSPECT: `playbook_status(run_id)` — each step's resolved inputs +
+outputs (your stack trace). Fix and repeat.
+
+### THE POINT: turn a prompt into a process
+A playbook's value is DECOMPOSITION — small, visible, reusable steps with
+structured data between them. The whole task in ONE agent() prompt
+is NOT a playbook.
+
+### AGENT DECIDES, THE WORKFLOW WORKS
+An `agent()` step is a DECISION node — a judgment needing tools or memory
+mid-reasoning. It is NOT where you do the work: fetching, searching,
+looping, transforming, storing go in `tool()`, `loop()`, `code()`,
+`state()` steps. A paragraph telling an agent to go DO a multi-step job IS
+your step list. The validator enforces this:
+- `monolithic-playbook` (ERROR — blocks): one delegated step hides the whole
+process. Decompose it.
+- `compound-leaf` (warning): one leaf's prompt hides a loop or several
+operations. Split it.
+- `agent-does-work` (warning): mechanical work with no judgment — use
+`tool()`. Treat warnings as redesign signals, not noise.
+
+Rules of thumb:
+- A step prompt containing 'and then', a numbered list, or 'each' is
+probably SEVERAL steps.
+- One LLM step = ONE judgment on ONE thing. Iterate with `loop()`, branch
+with `if_()`, do deterministic work with `tool()` or `code()`.
+- DEFAULT to `llm()` for pure transforms — one raw model call, no tools,
+cheaper, faster. Use `agent()` ONLY when the step must call tools or memory.
+- Prefer `output=` on llm/agent steps — structured data the next step can
+filter/branch on, not prose to re-parse. Gather loop results with `collect=`.
+
+### Worked example — 'scan my emails for subscriptions':
+WRONG: one agent() whose prompt loops, classifies, formats, totals.
+RIGHT:
+```python
+playbook(name='subscription-scan', description='Scan emails for paid subscriptions',
+    when_to_use='When the owner asks what subscriptions they pay for')
+
+fetch = tool('gmail__gmail__fetch_emails', query='after:2024/12/15 (receipt OR invoice)')
+scan = loop(
+    over='{{ steps.fetch.result.messages }}', item_name='email', concurrency=4,
+    body=[
+        (classify := llm('Is THIS ONE email a paid subscription? {{ email }}',
+            output={'is_subscription': 'bool', 'service': 'str', 'amount': 'number'})),
+    ],
+    collect='{{ steps.classify }}',
+)
+report = llm(
+    """Markdown report of: {{ steps.scan.collected | selectattr('is_subscription') | list }}""",
+    output={'report': 'str'},
+)
+notify = tool('send_chat_message', message='{{ steps.report.report }}')
+```
+Each step is inspectable and the data between steps is typed. THAT is a
+playbook.
+
+### SYNTAX ESSENTIALS (full rules: playbook_language_reference)
+- FIRST statement: the `playbook(...)` header — `name=` (required),
+`description=`, `when_to_use=`, `inputs=` (JSON-schema dict),
+`triggers=[trigger(event=..., filter={...}, map={...})]`.
+- Step kinds: `tool` `llm` `agent` `code` `if_` `loop` `parallel` `approve`
+`wait_event` `subtask` `state` `halt`, value assignment (`x = <expression>`
+— computes ONCE into a run-scoped var), top-level `def` (reusable
+sequence). In nested lists bind with `(x := llm(...))`.
+- `code("""<body>""", inputs={...})` runs jailed Python (no network) for
+anything DETERMINISTIC an llm() would only approximate — parsing, math,
+dedup, dates. `return` a JSON value; read `steps.<id>.result`. Requires
+plugin-inline-code-run on this agent.
+- EXPRESSIONS: plain strings pass through verbatim — Jinja `{{ ... }}` goes
+inside them; bare Python over `inputs`/`vars`/`steps`/`event` and f-strings
+work. Jinja FILTERS only exist inside strings:
+`'{{ vars.frontier | length > 0 }}'`. Dot access ALWAYS reads the dict key —
+never a Python method.
+
+### CONTEXT ECONOMY — iterate, never dump
+The #1 way a playbook fails is dumping a big collection into ONE model call.
+To process N items: LOOP, judge ONE per iteration with `llm()`, emit a SMALL
+structured result, `collect=` it, operate on the reduced set. NEVER
+interpolate a whole collection into one prompt.
+
+### REFERENCE SHAPES — or the run fails LOUD
+- `tool()` output is wrapped: `steps.<id>.result.<field>`.
+- Schemaless `llm()`/`agent()` returns `{_raw: <text>}` — read
+`steps.<id>._raw`. There is NO `.output`. Declare `output=` for typed fields
+(`steps.<id>.<field>`). This is the #1 cause of a loop that collected nulls.
+- `loop()`: `steps.<loop_id>.collected`. `code()`: `steps.<id>.result`.
+Value assignment / state(): `vars.<name>`.
+On a wrong-path error, copy the right one from `dry_run`'s `references`.
+
+### RUN-SCOPED STATE + NEVER HARDCODE A DISCOVERABLE LIST (hard rule)
+A `state()` step mutates run-scoped vars that PERSIST across loop iterations
+(read as `vars.<name>`) — stacks, queues, sets, counters (exact ops:
+playbook_language_reference). 'Scan/crawl/traverse a site / tree / paginated
+results / graph' MUST discover items at RUN TIME with a frontier — never N
+sibling tool() calls to URLs/items you guessed:
+```python
+playbook(name='site-crawl', description='BFS crawl',
+    inputs={'type': 'object', 'properties': {'start_url': {'type': 'string'}}})
+
+seed = state(set_('frontier', '[ inputs.start_url ]'), set_('visited', '[]'))
+crawl = loop(
+    while_='{{ vars.frontier | length > 0 }}',   # frontier grows + shrinks
+    max_iterations=200,
+    body=[
+        state(
+            pop_front('frontier', into='cur'),   # FIFO = BFS
+            add_unique('visited', '{{ vars.cur }}'),
+            id='take',
+        ),
+        tool('web_fetch', url='{{ vars.cur }}', id='fetch'),
+        (links := llm('List internal link URLs: {{ steps.fetch.result }}',
+                      output={'links': 'array'})),
+        loop(over='{{ steps.links.links }}', item_name='link', id='enqueue',
+            body=[
+                if_('{{ link not in vars.visited and link not in vars.frontier }}',
+                    then=[state(push_back('frontier', '{{ link }}'), id='push')],
+                    id='gate'),
+            ]),
+    ],
+)
+```
+Swap pop_front→pop_back for DFS. `visited` is the cycle guard;
+`max_iterations` bounds it (ALWAYS set it on a while_ loop, and mutate a
+`vars.*` each iteration or it runs to the cap). PREFER `concurrency=4` on a
+side-effect-free `over=` loop body — but never mutate shared state in a
+concurrent loop.
+
+### MANIFEST + THE EDIT FLOW (read → ticket → write)
+A playbook can carry a MANIFEST: the bigger picture in plain markdown —
+Purpose, Side effects, Never (invariants), Acceptance. It is context, not
+law: read it before changing things; nothing enforces it; if it goes stale,
+update it with `playbook_manifest_set` (saves a candidate; publish to go
+live). Editing is TWO steps:
+1. READ: `playbook_edit(name)` alone → a JSON header (versions, ticket)
+plus the manifest and current code as plain-text frames; copy `old=`
+snippets verbatim from the code frame.
+2. WRITE: `playbook_edit(name, ticket=..., ...)` with exactly one of `code=`
+or `old=`/`new=` (the `old` snippet must match exactly one place). The
+ticket is consumed by a successful write; a rejected write keeps it valid
+(fix and retry with the same ticket — do not re-read). It expires after
+15 minutes; no valid ticket, no save.
+Pass `manifest=` to `playbook_propose` on create; if a playbook has none,
+propose one.
+
+### CANDIDATE → PUBLISH (a save never changes the running playbook)
+Saving an edit creates a CANDIDATE — the LIVE playbook keeps running
+unchanged until you publish. Loop: edit → `candidate_saved` (one candidate
+max; history keeps every version) → `playbook_dry_run` (candidate by
+default) → REAL supervised proof `playbook_run_candidate` (asks the owner)
+→ `playbook_publish(name)` — gates: static validation, a green test run
+since the last edit, tool probes; a refusal names the failing gate — fix the
+candidate, never bypass. `playbook_rollback(name)` restores the previous
+live version. NEVER report an edit as done after `candidate_saved` — the
+old version runs until publish succeeds.
+
+### DRY-RUN STUBS (script what stubbed steps return)
+`playbook_dry_run(name, inputs, stubs)` — `stubs` is a JSON object mapping a
+step id or tool name (step id wins) to the raw result that step returns in
+the simulation, so downstream templates see fixture-shaped data.
+- Write stubs from recorded reality, not memory: after ANY real run — even
+a FAILED one — copy the step outputs `playbook_status(run_id)` shows.
+- Keep stubs SMALL — only the fields the playbook actually reads.
+
+### PREFLIGHT (are the tools alive?)
+Dry runs stub the outside world; `playbook_preflight(name)` probes every tool
+the playbook touches: `ok`, `unprobeable` (no probe declared — common, NOT
+an error), `failed` (missing tool, dead credential, gone resource — blocks
+publish). Run it when a playbook misbehaves despite a clean dry run, or before
+publishing external-service playbooks.
+
+### CHANGING AN EXISTING WORKFLOW (a new requirement = an insertion)
+A new requirement ('for EACH job role, first search LinkedIn') is almost
+always an INSERTION mid-graph, NOT a step bolted on the end, NEVER a second
+monolith. Recipe: read stage → find the SEAM ('for each role' means inside
+the per-role loop() body) → splice the new steps there, decomposed →
+RE-POINT downstream refs to the NEW step's output (this rewiring is the real
+work) → validate → dry_run → fix what the trace shows → publish. Never create a
+'-v2' copy — edit IN PLACE by name.
+
+### Posting to the chat from a playbook:
+`tool('send_chat_message', message='...')` posts live into a chat. An
+`llm()`/`agent()` output is only stored on the run record — a later
+send_chat_message must pass it on for the owner to SEE it. Chat-started
+and test runs deliver to their own chat; a triggered/scheduled run has NO
+chat — its send must pass an explicit `conversation_id` (or deliver via
+email/slack), else the step fails. Never dump routine run output into the
+ops chat. NEVER invent tool names — unknown tools are rejected.
+
+'Never run it on your own' = `playbook_set_autonomy` — a memory
+note enforces nothing. 'Put it back' = `playbook_rollback`.
+'''
+
+
+# ---- plans/014: failed-run awareness ---------------------------------------
+# The agent learns about failing playbooks AMBIENTLY: prompt_sections() is
+# re-read by core on every agent turn, so a conditional digest section below
+# reaches the agent at the start of its next natural turn. No muted message,
+# no spawned turn — the "no interrupting messages" constraint is structural.
+
+
+def _rel_age(dt: datetime | None, now: datetime) -> str:
+    # Server-computed relative age — the agent has no clock; never hand it
+    # raw timestamps to do math on.
+    if dt is None:
+        return "at an unknown time"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    secs = max(0.0, (now - dt).total_seconds())
+    if secs < 90:
+        return "just now"
+    if secs < 90 * 60:
+        return f"{int(secs // 60)} minutes ago"
+    if secs < 36 * 3600:
+        return f"{int(secs // 3600)} hours ago"
+    return f"{int(secs // 86400)} days ago"
+
+
+async def failure_digest(session) -> list[dict]:
+    """Failed-run summary per enabled playbook.
+
+    Scope: runs of the CURRENT live version only (an edit+publish resets the
+    count — "since the last change"), status 'failed', gated on the
+    version-scoped ack. Candidate runs are excluded by construction (their
+    playbook_version is the candidate number); dry runs never write
+    playbook_runs rows. One grouped query over the
+    (playbook_id, started_at) index; the per-playbook detail queries run only
+    for playbooks that are actually failing.
+    """
+    from sqlalchemy import case, func, select
+
+    from .models import FAILED_RUN_STATUSES, Playbook, PlaybookRun, PlaybookVersion
+
+    eff_live = func.coalesce(func.nullif(Playbook.live_version, 0), Playbook.version)
+    # plans/032 phase 08: `timed_out_unknown` (an effect in flight when the
+    # process died — docs/v2.md §6) is a failure here: the run ended without
+    # a green result and the owner must look. `parked` is neither finished
+    # nor failed anywhere.
+    failed = func.sum(case((PlaybookRun.status.in_(FAILED_RUN_STATUSES), 1), else_=0))
+    finished = func.sum(
+        case((PlaybookRun.status.in_((*FAILED_RUN_STATUSES, "done")), 1), else_=0)
+    )
+    rows = (await session.execute(
+        select(
+            Playbook.id,
+            Playbook.name,
+            eff_live.label("live"),
+            failed.label("failed"),
+            finished.label("finished"),
+        )
+        .join(
+            PlaybookRun,
+            (PlaybookRun.playbook_id == Playbook.id)
+            & (PlaybookRun.playbook_version == eff_live)
+            # 0.26.0 (plans/015, 089 §1): test runs never count as
+            # production failures.
+            & (PlaybookRun.is_test.is_(False)),
+        )
+        .where(Playbook.status == "enabled")
+        # plans/032 phase 04: a candidate-only row (live_version 0 with a
+        # candidate pointer) has nothing live — never read its 0 as "same
+        # as version". Legacy 0 rows are pinned by backfill_live_version.
+        .where(
+            (Playbook.live_version != 0) | (Playbook.candidate_version.is_(None))
+        )
+        .where(
+            (Playbook.failures_acked_version.is_(None))
+            | (Playbook.failures_acked_version != eff_live)
+        )
+        .group_by(Playbook.id, Playbook.name, Playbook.live_version, Playbook.version)
+        .having(failed > 0)
+    )).all()
+
+    out: list[dict] = []
+    for pid, name, live, n_failed, n_finished in rows:
+        last = (await session.execute(
+            select(PlaybookRun)
+            .where(
+                PlaybookRun.playbook_id == pid,
+                PlaybookRun.playbook_version == live,
+                PlaybookRun.status.in_(FAILED_RUN_STATUSES),
+                PlaybookRun.is_test.is_(False),
+            )
+            .order_by(PlaybookRun.started_at.desc())
+            .limit(1)
+        )).scalars().first()
+        promoted_at = (await session.execute(
+            select(PlaybookVersion.created_at)
+            .where(
+                PlaybookVersion.playbook_id == pid,
+                PlaybookVersion.version == live,
+            )
+            .limit(1)
+        )).scalar_one_or_none()
+        out.append({
+            "name": name,
+            "live_version": int(live),
+            "failed": int(n_failed),
+            "finished": int(n_finished),
+            "last_failed_run_id": str(last.id) if last else None,
+            "last_failed_at": last.started_at if last else None,
+            # plans/032 phase 04: the run's one-liner (docs/v2.md §7) so the
+            # digest names the failure, not just the count
+            "error": (getattr(last, "error", None) or None) if last else None,
+            # plans/032 phase 08: `OutcomeUnknown` names a timed_out_unknown
+            # run — the owner must check the target system, not just re-run
+            "error_type": (getattr(last, "error_type", None) or None) if last else None,
+            "promoted_at": promoted_at,
+        })
+    return out
+
+
+def render_failure_section(digest: list[dict], now: datetime | None = None) -> str:
+    if not digest:
+        return ""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    lines = ["## Playbook failures needing your attention"]
+    for d in digest:
+        promoted = (
+            f", promoted {_rel_age(d['promoted_at'], now)}" if d["promoted_at"] else ""
+        )
+        error = d.get("error")
+        if d.get("error_type") == "OutcomeUnknown" and not (error or "").startswith("OutcomeUnknown"):
+            error = f"OutcomeUnknown: {error}" if error else "OutcomeUnknown"
+        lines.append(
+            f"- `{d['name']}`: {d['failed']} of {d['finished']} runs FAILED "
+            f"since its last change (v{d['live_version']}{promoted}). "
+            f"Last failure {_rel_age(d['last_failed_at'], now)} "
+            f"(run_id {d['last_failed_run_id']}, inspect with playbook_status)."
+            + (f" — {error}" if error else "")
+        )
+    lines += [
+        "",
+        "You OWN these failures. First call playbook_status(run_id) to see "
+        "what broke, then tell the owner in the next normal conversation "
+        "turn — after finishing whatever they asked for, not instead of it. "
+        "Ask what they want to do and offer: fix it (playbook_edit → "
+        "publish), disable the playbook, or dismiss this notice "
+        "(playbook_ack_failures). Never derail a muted or trigger turn for "
+        "this. The ages above are server-computed — repeat them as given; "
+        "do not do timestamp math.",
+    ]
+    return "\n".join(lines)
+
+
+# 0.25.0 (plans/013, reinstated by plans/020): the delegation tools get their
+# OWN small skill — gating them behind playbook-authoring would drag the ~12KB
+# skill body into the MAIN conversation just to unlock the tool, defeating the
+# context-hygiene point. The delegate itself receives the full authoring
+# guidance in ITS context.
+_DELEGATION_SKILL_BODY = '''\
+# Delegating playbook work
+
+`playbook_agent(task, playbook="", wait_seconds=25)` hands a playbook
+authoring job (create, fix, edit) to a focused background agent.
+It runs the full loop — read, write (validated on save), dry-run, real
+candidate run, publish — in its own context; your chat keeps one call and
+one short result.
+
+## When to delegate vs. do it yourself
+
+Delegate the moment a job needs the authoring loop: creating a playbook,
+fixing a failing one, changing or adding steps. Load
+`playbook-authoring` and work inline only when the owner explicitly wants
+to build it together step by step, or the change is trivial and you already
+have the skill loaded this conversation.
+
+For an EDIT or FIX job, confirm the target exists first (`playbook_list`,
+one cheap call). If nothing matches the owner's name, say so and offer to
+create it — never delegate an edit against nothing.
+
+Two requests that are NOT authoring:
+- "never run it on your own" / "always ask me first" sets the RUN GATE,
+  it is not a fact to remember. BAD: memory_remember("must ask first") —
+  a note no gate ever reads. GOOD: playbook_set_autonomy(name,
+  "agent_must_confirm") — now the run itself asks.
+- "undo that change / put it back" is a rollback job — delegate it naming
+  the playbook; the delegate restores the previous live version.
+
+## Phrasing the task
+
+Write the task like a work order: goal + exact paths + constraints +
+acceptance. Name the playbook for edit/fix jobs. Copy the owner's workspace
+and file paths, examples, and desired final action; never reduce paths to
+"input" or "output". Good:
+"Fix the phone format in candidate-intake: numbers must normalize to
+E.164; publish when the candidate run is green."
+Spell collection jobs as loops — "for each unread email ..." — so the
+delegate builds a loop.
+
+## After calling
+
+A progress card appears. `running` means NOT done — nothing is created
+or published yet. Name the playbook and change in ONE sentence, then
+END YOUR TURN.
+BAD: "Playbook crm-import created and published — ready to use." (false —
+status was still running)
+GOOD: "The crm-import build is underway — the card tracks it; I'll
+confirm once it's live."
+Never poll after launching — but when a LATER owner message needs the
+result (they ask to change or run a playbook you were still building),
+check `playbook_agent_status` first instead of guessing. When the result
+carries a report (done / failed / needs_owner), relay it in owner words.
+Approval cards mid-delegation are the delegate asking — the owner just
+approves or declines.
+'''
 
 
 class PlaybooksPlugin(LunaPlugin):
@@ -48,7 +737,7 @@ class PlaybooksPlugin(LunaPlugin):
         name="plugin-playbooks",
         icon="workflow",
         image="assets/icon.png",
-        version="0.2.2",
+        version="0.57.16",
         description="Durable multi-step playbooks — Luna builds them, triggers fire them.",
         category="system",
         system_app=False,
@@ -67,330 +756,83 @@ class PlaybooksPlugin(LunaPlugin):
             SkillDef(
                 name="playbook-authoring",
                 description=(
-                    "how to build, edit, and debug playbooks — load before creating or "
-                    "modifying any playbook"
+                    "how to build, edit, and debug playbooks INLINE, in this "
+                    "conversation, for pblang playbooks (`playbook(` source) "
+                    "— load only when the owner asked to work "
+                    "through the playbook together step by step (or told you "
+                    "not to hand it off); for any other create/fix/change job "
+                    "load playbook-delegation instead. The authoring tools "
+                    "(propose, edit, validate, dry_run, …) unlock on your "
+                    "next turn"
                 ),
-                body=(
-                    "## Playbook Authoring\n\n"
-                    "A playbook is a YAML definition with steps that execute sequentially.\n\n"
-                    "### THE LOOP — build a playbook like you write code (read first)\n"
-                    "Authoring a playbook IS coding. Never run blind. Always:\n"
-                    "0. OUTLINE FIRST — before any YAML, write the decomposition as one "
-                    "line per step: `id -> kind -> the SINGLE operation`. Then self-check "
-                    "three rules: (a) any line with a quantifier (each/all/every) MUST be "
-                    "a `loop`; (b) no single step may carry the whole task — if one step "
-                    "would, you have one line, so keep decomposing until each line is "
-                    "atomic; (c) each `agent_step`/`llm_step` is ONE judgment on ONE "
-                    "thing. Only when the outline passes do you write YAML.\n"
-                    "1. WRITE/EDIT the YAML (`playbook_propose` to create, "
-                    "`playbook_edit` to rewrite a whole existing one).\n"
-                    "2. COMPILE: `playbook_validate(name=...)` or "
-                    "`playbook_validate(definition_yaml=...)` — a static check that "
-                    "returns ALL errors at once (undefined {{steps}}/{{inputs}} refs, "
-                    "unknown tools, bad loops, cycles). Fix every error before running.\n"
-                    "3. TEST: `playbook_dry_run(name, inputs)` — simulates the run with "
-                    "tool/LLM steps STUBBED. It proves loops iterate, branches pick the "
-                    "right path, and templates resolve — with no side effects and no "
-                    "token cost. The outputs are SIMULATED: NEVER report a dry-run value "
-                    "to the user as a real result.\n"
-                    "   Reading the result: `references` shows the exact template "
-                    "namespace — i.e. precisely what every `steps.<id>.<field>` "
-                    "resolves to. Copy your paths from there. The `trace` list is "
-                    "execution order; its per-step `output` key is JUST a trace label "
-                    "— do NOT write `steps.<id>.output.<field>` in templates (that key "
-                    "does not exist in the namespace). A loop result is "
-                    "`{iterations, results, collected}`, so gather with "
-                    "`steps.<loop_id>.collected`.\n"
-                    "4. RUN: `playbook_run(name, inputs)` for real.\n"
-                    "5. INSPECT: `playbook_status(run_id)` — shows each step's resolved "
-                    "inputs + outputs (your stack trace). Fix and repeat.\n\n"
-                    "### THE POINT: turn a prompt into a process (read first)\n"
-                    "A playbook's value is DECOMPOSITION — breaking a task into small, "
-                    "visible, reusable steps with structured data flowing between them. "
-                    "If you put the whole task into ONE agent_step's prompt ('search "
-                    "emails, find subscriptions, format a table, total it'), you've "
-                    "built a prompt wearing a playbook costume: one opaque LLM call, no "
-                    "per-step visibility, no reuse, no typed data. Don't.\n\n"
-                    "### AGENT DECIDES, THE WORKFLOW WORKS (the core principle)\n"
-                    "An `agent_step` is a DECISION node — a judgment that needs tools or "
-                    "memory mid-reasoning. It is NOT where you do the work. Fetching, "
-                    "searching, looping, transforming, storing, traversing are WORK — "
-                    "they go in `tool_call`, `loop`, `state` nodes where each is visible, "
-                    "typed, and reusable. If you catch yourself writing a paragraph that "
-                    "tells an agent to go DO a multi-step job, stop: that paragraph is "
-                    "your step list. Call an agent only for the DECISIONS the graph "
-                    "cannot express deterministically (judge / classify / rank / choose), "
-                    "and put everything around the decision into explicit steps.\n"
-                    "The validator enforces this and will report:\n"
-                    "- `monolithic-playbook` (ERROR — blocks): the whole playbook is one "
-                    "delegated step that hides a process. You must decompose it.\n"
-                    "- `compound-leaf` (warning): one leaf step's prompt hides a loop or "
-                    "several operations (a quantifier like 'each/all', an 'and then', or "
-                    "multiple verbs). Make a loop / split the step.\n"
-                    "- `agent-does-work` (warning): an `agent_step` is doing mechanical "
-                    "work with no judgment — use a `tool_call`. Treat warnings as "
-                    "redesign signals, not noise.\n\n"
-                    "Rules of thumb:\n"
-                    "- If a step's prompt contains 'and then', a numbered list, or the "
-                    "word 'each', it is probably SEVERAL steps.\n"
-                    "- One LLM step = ONE judgment or extraction on ONE thing "
-                    "(classify THIS email; summarize THIS doc). Iterate with a `loop`, "
-                    "branch with a `condition`, do deterministic work with `tool_call`.\n"
-                    "- DEFAULT to `llm_step` for pure transforms (classify, extract, "
-                    "summarize, format a report). It's a single raw model call — no "
-                    "tools, no memory — so it's cheaper, faster (Haiku by default), and "
-                    "deterministic. Use `agent_step` ONLY when the step must call tools "
-                    "or use memory mid-reasoning.\n"
-                    "- Prefer `output_schema` on llm/agent steps so they emit STRUCTURED "
-                    "DATA (e.g. {is_subscription, service, amount}) the next step can "
-                    "filter/branch on — not prose a later step has to re-parse.\n"
-                    "- To gather results across a loop, use `collect` (see Loop config); "
-                    "read them at `steps.<loop_id>.collected`.\n\n"
-                    "### Worked example — 'scan my emails for subscriptions':\n"
-                    "WRONG (one mega-step): a single agent_step whose prompt loops over "
-                    "emails, classifies, formats a table, and totals it.\n"
-                    "RIGHT (a process):\n"
-                    "```yaml\n"
-                    "steps:\n"
-                    "  - id: fetch          # deterministic fetch\n"
-                    "    kind: tool_call\n"
-                    "    tool: gmail__gmail__fetch_emails\n"
-                    "    args: {query: 'after:2024/12/15 (receipt OR invoice OR subscription)'}\n"
-                    "  - id: scan           # iterate; collect one row per email\n"
-                    "    kind: loop\n"
-                    "    over: '{{ steps.fetch.result.messages }}'  # tool data is under .result\n"
-                    "    item_name: email\n"
-                    "    collect: '{{ steps.classify }}'\n"
-                    "    body:\n"
-                    "      - id: classify   # ONE judgment on ONE email, structured out\n"
-                    "        kind: llm_step  # raw model call — no tools needed\n"
-                    "        output_schema: {is_subscription: bool, service: str, amount: number}\n"
-                    "        prompt: 'Is THIS ONE email a paid subscription? {{ email }}'\n"
-                    "  - id: report         # consume the collected rows, filter, format\n"
-                    "    kind: llm_step      # pure formatting → Haiku, no tools\n"
-                    "    output_schema: {report: str}\n"
-                    "    prompt: |\n"
-                    "      Build a markdown report of subscriptions from these rows:\n"
-                    "      {{ steps.scan.collected | selectattr('is_subscription') | list }}\n"
-                    "  - id: notify         # surface it in chat\n"
-                    "    kind: tool_call\n"
-                    "    tool: send_chat_message\n"
-                    "    args: {message: '{{ steps.report.report }}'}\n"
-                    "```\n"
-                    "Each step is inspectable on the canvas, `classify` is reusable, and "
-                    "the data between steps is typed. THAT is a playbook.\n\n"
-                    "### CONTEXT ECONOMY — iterate, never dump (critical)\n"
-                    "Keep the AGENTIC CONTEXT small. The #1 way a playbook fails is "
-                    "dumping a big collection into ONE model call and exploding the "
-                    "context window. To process N items (emails, rows, docs, search "
-                    "results):\n"
-                    "- LOOP over them; read/summarize ONE per iteration with an "
-                    "`llm_step`; emit a SMALL structured result per item; `collect` it.\n"
-                    "- Then operate on the reduced set (filter/aggregate/format), or "
-                    "persist each item to a store/DB and query it later.\n"
-                    "- NEVER write a single step whose prompt interpolates a whole "
-                    "collection like `{{ steps.fetch.result.messages }}` for 1000 emails "
-                    "— that is brute force and will fail. The validator warns when it "
-                    "sees this; treat that warning as a redesign signal. Iteration beats "
-                    "brute force, always.\n\n"
-                    "### REFERENCE SHAPES — get the path right or the run fails LOUD\n"
-                    "Templates now fail loudly on an undefined reference (no more silent "
-                    "nulls). Two shapes trip everyone up — memorize them:\n"
-                    "- `tool_call` output is wrapped: read the tool's data under "
-                    "`.result`. A tool returning {messages: [...]} is "
-                    "`steps.<id>.result.messages` — NOT `steps.<id>.messages`.\n"
-                    "- A schemaless `llm_step`/`agent_step` returns `{_raw: <text>}`. "
-                    "Read it as `steps.<id>._raw`. There is NO `.output`. To get typed "
-                    "fields (`steps.<id>.field`), declare an `output_schema`. This is the "
-                    "#1 cause of a loop that collected nulls — `collect` an "
-                    "`output_schema` field, or `._raw`, never `.output`.\n"
-                    "- `loop` output is {iterations, results, collected, stopped} — gather "
-                    "with `steps.<loop_id>.collected`. `stopped` is null (drained), "
-                    "'break' (break_when), or 'max_iterations' (hit the cap).\n"
-                    "The validator checks these shapes statically — if it errors on a "
-                    "`.field`, you have the wrong path; copy the right one from "
-                    "`dry_run`'s `references`.\n\n"
-                    "### RUN-SCOPED STATE — stacks, queues, sets, counters (the big one)\n"
-                    "A `state` step mutates run-scoped variables that PERSIST across loop "
-                    "iterations. Read them in any template as `vars.<name>` (note: "
-                    "`vars.items` reads the KEY `items`, it is safe to name a queue "
-                    "`items`/`keys`/`values`). This is how you build a REAL recursive "
-                    "crawl / BFS / DFS / dedup / accumulator — instead of HARDCODING a "
-                    "list of things you guessed.\n"
-                    "Ops (one `state` step may carry several, applied in order):\n"
-                    "- `set` var=value | `append`/`extend` (list grow) | `merge` (dict)\n"
-                    "- `push_back` + `pop_back` = STACK (LIFO)\n"
-                    "- `push_back` + `pop_front` = QUEUE (FIFO)\n"
-                    "- `pop_back`/`pop_front` need `into: <var>` to capture what you "
-                    "popped (else it's discarded — the validator warns)\n"
-                    "- `add_unique` = SET (dedup) | `incr`/`decr` = COUNTER | `delete`\n"
-                    "`value` is a Jinja expression when it's a string: "
-                    "`value: \"[ inputs.start ]\"`, `value: \"{{ vars.url }}\"`, "
-                    "`value: \"[]\"`, `value: \"1\"`.\n"
-                    "Loops gained `while:` (loop WHILE truthy — the frontier pattern), "
-                    "`break_when:` (stop after an iteration), and `concurrency: N` "
-                    "(bounded parallel map; the body must NOT mutate shared state).\n\n"
-                    "### NEVER HARDCODE A DISCOVERABLE LIST (hard rule)\n"
-                    "If a task is 'scan/crawl/traverse a site / a tree / paginated "
-                    "results / a graph', you MUST discover items at RUN TIME with a "
-                    "frontier — do NOT write N sibling tool_calls to URLs/items you "
-                    "guessed or found yourself. Hand-listing items a loop could fetch is a "
-                    "junior mistake and the validator flags it. The pattern:\n"
-                    "```yaml\n"
-                    "steps:\n"
-                    "  - id: seed\n"
-                    "    kind: state\n"
-                    "    state:\n"
-                    "      - { op: set, var: frontier, value: '[ inputs.start_url ]' }\n"
-                    "      - { op: set, var: visited, value: '[]' }\n"
-                    "  - id: crawl\n"
-                    "    kind: loop\n"
-                    "    while: '{{ vars.frontier | length > 0 }}'   # grows + shrinks\n"
-                    "    max_iterations: 200                          # safety cap\n"
-                    "    body:\n"
-                    "      - id: take\n"
-                    "        kind: state\n"
-                    "        state:\n"
-                    "          - { op: pop_front, var: frontier, into: cur }  # FIFO = BFS\n"
-                    "          - { op: add_unique, var: visited, value: '{{ vars.cur }}' }\n"
-                    "      - id: fetch\n"
-                    "        kind: tool_call\n"
-                    "        tool: web_fetch\n"
-                    "        args: { url: '{{ vars.cur }}' }\n"
-                    "      - id: links            # extract links from THIS page only\n"
-                    "        kind: llm_step\n"
-                    "        output_schema: { links: array }\n"
-                    "        prompt: 'List internal link URLs on this page:\\n"
-                    "{{ steps.fetch.result }}'\n"
-                    "      - id: enqueue          # add unseen links to the frontier\n"
-                    "        kind: loop\n"
-                    "        over: '{{ steps.links.links }}'\n"
-                    "        item_name: link\n"
-                    "        body:\n"
-                    "          - id: gate\n"
-                    "            kind: condition\n"
-                    "            when: '{{ link not in vars.visited and link not in vars.frontier }}'\n"
-                    "            then:\n"
-                    "              - id: push\n"
-                    "                kind: state\n"
-                    "                state: [ { op: push_back, var: frontier, value: '{{ link }}' } ]\n"
-                    "```\n"
-                    "Swap `pop_front`→`pop_back` for DFS. The `visited` set makes it "
-                    "cycle-safe; `max_iterations` bounds it. THAT is a crawl.\n\n"
-                    "### Step kinds:\n"
-                    "- `tool_call`: calls a registered Luna tool with templated args\n"
-                    "- `llm_step`: a RAW model call (no tools/memory/identity) — PREFER "
-                    "this for transforms. Config: `prompt` (required), `output_schema` "
-                    "(structured out), `purpose` (router chain; default `summarization` "
-                    "→ Haiku; use `reasoning` for the big model), `model` "
-                    "(\"provider/model\" to force one), `system` (optional system text). "
-                    "Returns a structured dict (with output_schema) or `{_raw: text}`.\n"
-                    "- `agent_step`: FULL agent turn via run_turn() — system prompt, tool "
-                    "catalog, memory, skills. Use ONLY when the step needs tools/memory "
-                    "mid-reasoning; otherwise use `llm_step`. Returns structured dict.\n"
-                    "- `condition`: branches on a Jinja expression (then/else)\n"
-                    "- `parallel`: fan-out N branches, fan-in waits for all\n"
-                    "- `wait_for_approval`: pauses, resumes on owner click\n"
-                    "- `wait_for_event`: pauses, resumes on matching bus event\n"
-                    "- `subtask`: invokes another playbook with mapped inputs; add "
-                    "`returns: {key: '{{ steps.<sub_id>.field }}'}` to surface the "
-                    "sub-workflow's outputs to the parent as steps.<subtask_id>.key\n"
-                    "- `loop`: repeats body `over` a list, `while`/`until` a condition; "
-                    "supports `break_when` and `concurrency`\n"
-                    "- `state`: mutate run-scoped `vars` (stack/queue/set/counter/dict) — "
-                    "see RUN-SCOPED STATE above\n"
-                    "- `halt`: end the run early as SUCCESS (optional `when:` guard, "
-                    "optional `value:` result) — e.g. stop when nothing to do\n\n"
-                    "### Trigger syntax:\n"
-                    "```yaml\n"
-                    "triggers:\n"
-                    "  - event: email.received\n"
-                    "    filter: {label: 'support'}\n"
-                    "    map: {email: '{{event.payload}}'}\n"
-                    "```\n\n"
-                    "### Templates:\n"
-                    "Use Jinja2: `{{inputs.email.body}}`, `{{steps.classify.class}}`\n\n"
-                    "### Creating a new playbook (whole-YAML — the ONLY way):\n"
-                    "Write the COMPLETE YAML (steps, triggers, inputs) and call "
-                    "`playbook_propose(name, definition_yaml=...)`. Author the whole "
-                    "definition at once like a source file — do NOT build a playbook "
-                    "node by node. There are no add-step / add-trigger / save tools; "
-                    "everything is one YAML document. Validate first with "
-                    "`playbook_validate(definition_yaml=...)` if unsure.\n\n"
-                    "### Loop config (exact syntax — no other fields work):\n"
-                    "```json\n"
-                    "{\"over\": \"range(1, inputs.n + 1)\", \"item_name\": \"number\", \"max_iterations\": 100}\n"
-                    "```\n"
-                    "- `over`: a LITERAL LIST (e.g. `[1, 2, 3]`) or a Jinja expression "
-                    "producing a list (e.g. `\"range(1, inputs.n + 1)\"`)\n"
-                    "- `until`: alternative — Jinja condition, loops UNTIL true\n"
-                    "- `while`: loops WHILE true (the frontier/queue pattern; mutate a "
-                    "`vars.*` each iteration with a state step or it runs to the cap)\n"
-                    "- `break_when`: Jinja condition checked AFTER each iteration; stops "
-                    "the loop early (result `stopped: 'break'`)\n"
-                    "- `concurrency: N`: run up to N item bodies in parallel (default 1). "
-                    "Bodies are isolated — do NOT mutate shared state inside a "
-                    "concurrent loop; only `collect` merges back (in item order)\n"
-                    "- `max_iterations`: hard safety cap; on hit, result `stopped: "
-                    "'max_iterations'` (always set one on a `while` loop)\n"
-                    "- `count: N` is accepted as shorthand for `over: range(1, N + 1)`\n"
-                    "- `item_name`: name for the current item inside the body — "
-                    "`item_name: \"number\"` makes `{{ number }}` and `{{ number_index }}` work\n"
-                    "- `collect`: a Jinja expression evaluated AFTER each iteration's "
-                    "body (item vars still in scope); each result is appended to a list "
-                    "exposed as `{{ steps.<loop_id>.collected }}`. THIS is how you gather "
-                    "per-iteration outputs — without it, only the last iteration's step "
-                    "outputs survive the loop. Collect everything, then filter in the "
-                    "next step (e.g. `| selectattr('is_subscription')`).\n"
-                    "- `{{steps.<loop_id>._item}}` and `{{steps.<loop_id>._index}}` also work — "
-                    "there is NO `loop.index`\n"
-                    "- Keys like `iterator`, `from`, `to` DO NOT EXIST — unknown keys are rejected\n"
-                    "- Undefined variables in templates or `over`/`until` FAIL the run loudly\n"
-                    "- A loop with an empty body does NOTHING — you MUST nest steps inside it.\n\n"
-                    "### Nesting steps inside loops/conditions:\n"
-                    "Nesting is pure YAML structure. Put child steps under the parent's "
-                    "`body:` (loop) or `then:`/`else:` (condition) keys — see the loop "
-                    "and crawl examples above. A loop with an empty body does nothing, "
-                    "so always nest at least one step inside it.\n\n"
-                    "### CHANGING AN EXISTING WORKFLOW (a new requirement = an insertion)\n"
-                    "A new requirement (e.g. 'for EACH job role, first search LinkedIn "
-                    "for comparables and make a list') is almost always an INSERTION "
-                    "mid-graph, NOT a step bolted on the end, and NEVER a second "
-                    "monolith. Recipe:\n"
-                    "1. `playbook_get_definition(name)` — read the current YAML.\n"
-                    "2. Find the SEAM — where the new work belongs. 'for each role' means "
-                    "inside the per-role `loop` body (before whatever consumes the role), "
-                    "not a new top-level step.\n"
-                    "3. Splice the new steps there, decomposed (a quantifier -> a loop; "
-                    "one judgment per item; collect). \n"
-                    "4. RE-POINT downstream refs — the steps that ran after the seam must "
-                    "now read the NEW step's output (e.g. the ranking step now also reads "
-                    "`steps.<comparables>.collected`). This rewiring is the real work of "
-                    "a change.\n"
-                    "5. `playbook_validate` -> `playbook_dry_run` -> `playbook_run`. The "
-                    "same lints apply, so the insertion can't reintroduce a monolith.\n\n"
-                    "### Editing an existing playbook (whole-YAML, version history):\n"
-                    "To modify a live playbook, edit it IN PLACE by NAME — NEVER create a "
-                    "new playbook (no '-v2' copies).\n\n"
-                    "1. `playbook_get_definition(name)` → read the current full YAML.\n"
-                    "2. Edit that YAML — make ALL your changes to the whole document.\n"
-                    "3. `playbook_edit(name, definition_yaml=...)` → it snapshots a "
-                    "version, validates, and replaces the definition in one step, the "
-                    "same way you'd save an edited source file.\n"
-                    "There is NO incremental/node-by-node edit path — always rewrite the "
-                    "whole YAML. After editing, re-run `playbook_validate` and "
-                    "`playbook_dry_run`.\n\n"
-                    "### Posting to the chat from a playbook (006.712):\n"
-                    "- Steps CAN post messages into the chat: call the `send_chat_message` "
-                    "tool (via a `tool_call` step with args `{\"message\": \"...\"}`, or "
-                    "instruct an `agent_step` to call it). Messages land in the "
-                    "conversation the run was started from, live.\n"
-                    "- An `llm_step`/`agent_step` output is only stored on the run record — "
-                    "if the owner should SEE something, a later `tool_call` step must "
-                    "pass it to `send_chat_message` (an `llm_step` can't call tools).\n"
-                    "- NEVER invent other tool names. A `tool_call` step must reference a tool "
-                    "from your actual tool list — unknown tools are rejected at authoring time."
+                body=_AUTHORING_SKILL_BODY,
+                tools=[
+                    "playbook_propose",
+                    "playbook_edit",
+                    "playbook_manifest_set",
+                    "playbook_publish",
+                    "playbook_rollback",
+                    "playbook_run_candidate",
+                    "playbook_get_definition",
+                    "playbook_validate",
+                    "playbook_dry_run",
+                    "playbook_set_autonomy",
+                    "playbook_list_available_triggers",
+                    "playbook_preflight",
+                    "playbook_language_reference",
+                ],
+            ),
+            # 0.49.0 (plans/032 phase 05): the v2 skill — python playbooks on
+            # the segment loop. Same tools minus the pblang language
+            # reference (the skill IS the reference, docs/v2.md).
+            SkillDef(
+                name="playbook-authoring-v2",
+                description=(
+                    "how to build, edit, and debug playbooks INLINE, in this "
+                    "conversation, for python playbooks (`async def run(ctx, "
+                    "inputs)`), the default for new playbooks — load only "
+                    "when the owner asked to work through the playbook "
+                    "together step by step (or told you not to hand it off); "
+                    "for any other create/fix/change job load "
+                    "playbook-delegation instead. The authoring tools "
+                    "(propose, edit, dry_run, run_candidate, publish, …) "
+                    "unlock on your next turn"
                 ),
+                body=V2_SKILL_BODY,
+                tools=[
+                    "playbook_propose",
+                    "playbook_edit",
+                    "playbook_manifest_set",
+                    "playbook_publish",
+                    "playbook_rollback",
+                    "playbook_run_candidate",
+                    "playbook_get_definition",
+                    "playbook_validate",
+                    "playbook_dry_run",
+                    "playbook_set_autonomy",
+                    "playbook_list_available_triggers",
+                    "playbook_preflight",
+                ],
+            ),
+            # 0.25.0 (plans/013, reinstated by plans/020): small skill, big
+            # tool — see _DELEGATION_SKILL_BODY for why this is not in
+            # playbook-authoring.
+            SkillDef(
+                name="playbook-delegation",
+                description=(
+                    "hand playbook work to a focused background agent with a "
+                    "live progress card — the DEFAULT whenever the owner wants "
+                    "a playbook created, fixed, or changed (it keeps this "
+                    "conversation small); load playbook-authoring instead only "
+                    "when the owner asked to build it together step by step. "
+                    "playbook_agent unlocks on your next turn"
+                ),
+                body=_DELEGATION_SKILL_BODY,
+                tools=[
+                    "playbook_agent",
+                    "playbook_agent_status",
+                    "playbook_set_autonomy",
+                ],
             ),
         ],
     )
@@ -400,8 +842,136 @@ class PlaybooksPlugin(LunaPlugin):
         self._trigger_service = None
         self._binding_service = None
         self._session_factory = None
+        self._run_wake = None
+        self._fix_proposals = None
+        self._ctx = None
+        self._unsub_publish_guard = None
+        self._unsub_publish_decisions = None
+        self._publish_wakes: set[asyncio.Task] = set()
+
+    def _start_publish_guard(self, ctx: PluginContext) -> None:
+        """plans/034: record the owner's decision on the last publish card
+        (`approval.decided` → publish_guard.note_decision). Idempotent;
+        loop-independent like park.start()."""
+        if self._unsub_publish_guard is not None:
+            return
+        subscribe = getattr(ctx.events, "subscribe", None)
+        if not callable(subscribe):
+            logger.warning(
+                "playbooks: event bus has no subscribe() — the publish loop "
+                "guard relies on the engine's card status only"
+            )
+            return
+        sf = ctx.db_session_factory
+
+        async def _on_decided(payload, *_a, **_kw) -> None:
+            if not isinstance(payload, dict) or not payload.get("id"):
+                return
+            from .publish_guard import note_decision
+            try:
+                await note_decision(
+                    sf, approval_id=str(payload["id"]),
+                    decision=str(payload.get("decision") or ""),
+                )
+            except Exception:  # noqa: BLE001 — never break the emitter
+                logger.exception("playbooks: publish guard could not record a decision")
+
+        self._unsub_publish_guard = subscribe("approval.decided", _on_decided)
+        self._unsub_publish_decisions = subscribe(
+            "approval.orphan_decided", self._on_publish_decision,
+        )
+
+    async def _on_publish_decision(self, event: object, *_a, **_kw) -> None:
+        """Commit an approved publish with the ordinary gated tool handler.
+
+        The orphan event follows the engine's exact-payload pre-grant. A
+        candidate can become live only if the remembered card and candidate
+        still match; a model wake is never treated as the publish effect.
+        """
+        if not isinstance(event, dict) or event.get("kind") != "playbook_change":
+            return
+        payload = event.get("payload")
+        if not isinstance(payload, dict) or payload.get("action") != "publish":
+            return
+        name, version = payload.get("name"), payload.get("version")
+        approval_id = event.get("id")
+        if (not isinstance(name, str) or not name or type(version) is not int
+                or version < 1 or not isinstance(approval_id, str)):
+            return
+
+        from sqlalchemy import select
+        from .models import Playbook
+
+        async with self._session_factory() as session:
+            row = (await session.execute(
+                select(Playbook).where(Playbook.name == name)
+            )).scalar_one_or_none()
+            if row is None or (
+                row.last_card_approval_id != approval_id
+                or row.last_card_action != "publish"
+                or row.last_card_version != version
+                or row.last_card_decision != event.get("decision")
+                or row.candidate_version != version
+            ):
+                return
+
+        decision = event.get("decision")
+        if decision == "approved":
+            try:
+                registered = self._ctx.tool_registry.get("playbook_publish")
+                result = json.loads(await registered.handler(
+                    name=name,
+                    explanation=(
+                        "Owner approved the exact candidate publish card; "
+                        "commit it after all gates and verify the stored version."
+                    ),
+                ))
+            except Exception as exc:  # noqa: BLE001 — decision remains auditable
+                logger.exception("playbooks: approved publish commit failed")
+                result = {"error": f"Publish commit failed: {type(exc).__name__}"}
+        elif decision == "rejected":
+            result = {"error": "The owner rejected publication; candidate remains unpublished."}
+        else:
+            return
+
+        verified = (
+            result.get("published") is True
+            and result.get("verified") is True
+            and result.get("live_version") == version
+        )
+        if verified:
+            message = (
+                f"The owner approved '{name}' version {version}. The normal "
+                f"publish gate committed it and a fresh store read-back verified "
+                f"live_version={version}. Continue the mission from this "
+                "verified state; do not publish it again."
+            )
+        else:
+            message = (
+                f"The owner decision for '{name}' version {version} was "
+                f"'{decision}', but it is NOT verified live. "
+                f"Publish result: {json.dumps(result, default=str)}. "
+                "Report the actual stored state; do not claim publication."
+            )
+        send = getattr(self._ctx, "send_muted_message", None)
+        conv = event.get("conversation_id")
+        if not callable(send) or not conv:
+            return
+        try:
+            conv_id = uuid.UUID(str(conv))
+        except ValueError:
+            return
+        task = asyncio.create_task(send(
+            "Playbook publish decision", message,
+            channel="moment", respond=True, conversation_id=conv_id,
+            source="playbooks", tools="all", max_turns=12,
+            token_budget=200_000, timeout_s=900,
+        ), name="playbook-publish-decision-wake")
+        self._publish_wakes.add(task)
+        task.add_done_callback(self._publish_wakes.discard)
 
     async def on_load(self, ctx: PluginContext) -> None:
+        self._ctx = ctx
         self._session_factory = ctx.db_session_factory
         from .agent_tools import build_tools
         from .models import Base
@@ -416,6 +986,37 @@ class PlaybooksPlugin(LunaPlugin):
             for table in Base.metadata.sorted_tables:
                 await conn.run_sync(table.create, checkfirst=True)
 
+        # 0.8.0 (plans/002 phase 1): `table.create(checkfirst=True)` also
+        # skips COLUMNS on pre-existing tables — late-added columns need an
+        # ALTER (see _COLUMN_MIGRATIONS).
+        try:
+            await _ensure_columns(ctx.engine)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("playbooks: column migration failed: %s", e)
+        try:
+            await _drop_legacy_indexes(ctx.engine)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("playbooks: legacy index drop failed: %s", e)
+        # 0.47.0: the stored-tests feature is gone — drop its table and column.
+        try:
+            await _drop_spec_remnants(ctx.engine)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("playbooks: spec remnant drop failed: %s", e)
+
+        # plans/001: `table.create(checkfirst=True)` skips the whole table when
+        # it already exists, indexes included — so installs that predate an
+        # index never get it. Create each one on its own, and never let a
+        # legacy/locked database block the plugin from loading.
+        for table in Base.metadata.sorted_tables:
+            for index in table.indexes:
+                try:
+                    async with ctx.engine.begin() as conn:
+                        await conn.run_sync(index.create, checkfirst=True)
+                except Exception as e:  # pragma: no cover - depends on the DB
+                    logger.warning(
+                        "playbooks: could not create index %s: %s", index.name, e
+                    )
+
         self._runner = PlaybookRunner(
             session_factory=ctx.db_session_factory,
             tool_registry=ctx.tool_registry,
@@ -423,16 +1024,102 @@ class PlaybooksPlugin(LunaPlugin):
             agent=ctx.agent,
             context=ctx,
         )
+        # plans/032 phase 07: parked runs — subscribe `approval.decided` now
+        # (loop-independent); timers/subscriptions are rebuilt by
+        # `park.reconcile()` in on_server_ready on the serving loop.
+        self._runner.park.start()
+        # plans/034: the publish loop guard learns the owner's decision on
+        # the card it raised (publish_guard.note_decision) — same bus, same
+        # event, independent of the parked-run index.
+        self._start_publish_guard(ctx)
+
+        # 0.5.1: rows still "running" from before this process existed
+        # (restart/upgrade, or pre-0.5.0 cancelled-mid-run coroutines) would
+        # otherwise sit at "running" forever. Never block the load on it.
+        # 0.51.0 (plans/032 phase 06): v2 rows (journal row 0) are skipped
+        # here and resumed in on_server_ready.
+        try:
+            await self._runner.sweep_orphaned_runs()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("playbooks: orphan-run sweep failed: %s", e)
+
+        # 0.8.0: backfill pblang code for pre-code playbooks. Only stored when
+        # compile(codegen(ir)) reproduces the ir exactly; otherwise the code
+        # stays NULL and is derived on read.
+        try:
+            await backfill_code(ctx.db_session_factory)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("playbooks: code backfill failed: %s", e)
+
+        # 0.10.0: make live_version explicit on pre-candidate rows.
+        try:
+            await backfill_live_version(ctx.db_session_factory)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("playbooks: live_version backfill failed: %s", e)
+
+        # plans/032 phase 08: format per version row / run row.
+        try:
+            await backfill_format(ctx.db_session_factory)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("playbooks: format backfill failed: %s", e)
+
+        # 0.38.0: drop redundant duplicate (playbook, version) rows left by
+        # the pre-0.32 edit path (they 500ed version reads and doubled the
+        # Versions list).
+        try:
+            from .versioning import heal_duplicate_version_rows
+            await heal_duplicate_version_rows(ctx.db_session_factory)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("playbooks: duplicate-version heal failed: %s", e)
 
         init_routes(
             ctx.db_session_factory, self._runner, ctx.events,
             sync_bindings=self.sync_trigger_bindings,
+            trigger_sources=ctx.trigger_sources,
+            ctx=ctx,
         )
 
         for tool_def, handler in build_tools(
-            ctx.db_session_factory, ctx.events, self._runner,
+            ctx.db_session_factory, ctx.events, self._runner, ctx,
         ):
-            ctx.tool_registry.register(self.manifest.name, tool_def, handler)
+            self._register_tool(ctx, tool_def, handler)
+
+        # 0.26.0 (plans/015, 089 §4): file fix proposals for live failures.
+        from .fix_proposals import FixProposalService
+
+        self._fix_proposals = FixProposalService(
+            ctx.db_session_factory, ctx.events, ctx,
+        )
+        try:
+            self._fix_proposals.start()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("playbooks: fix-proposal service failed to start: %s", e)
+
+        # 0.44.0 (plans/028): wake the agent when a promised run completes;
+        # awareness rows in the ops chat for background runs.
+        from .wake import RunCompletionWake
+
+        self._run_wake = RunCompletionWake(
+            ctx.db_session_factory, ctx.events, ctx,
+        )
+        try:
+            self._run_wake.start()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("playbooks: run-wake service failed to start: %s", e)
+
+        # 0.25.0 (plans/013, reinstated by plans/020): delegation tools +
+        # restart hygiene for rows a dead process left at "running". Never
+        # block the load on the sweep.
+        from .delegation import build_delegation_tools, sweep_orphaned_delegations
+
+        for tool_def, handler in build_delegation_tools(
+            ctx, ctx.db_session_factory, self.AUTHORING_TOOLS,
+        ):
+            self._register_tool(ctx, tool_def, handler)
+        try:
+            await sweep_orphaned_delegations(ctx.db_session_factory)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("playbooks: orphan-delegation sweep failed: %s", e)
 
         self._register_trigger_tools(ctx)
 
@@ -468,6 +1155,68 @@ class PlaybooksPlugin(LunaPlugin):
         if self._binding_service is not None:
             await self._binding_service.sync()
 
+    # 0.3.0: authoring tools ride behind the playbook-authoring skill (the
+    # manifest SkillDef lists them) — building/editing playbooks is rare and
+    # the skill body is required reading anyway. Run/inspect tools
+    # (playbook_run/list/status/cancel) stay visible every turn. A core
+    # that cannot gate fails loud at load time (plans/027).
+    AUTHORING_TOOLS = (
+        "playbook_propose",
+        "playbook_edit",
+        "playbook_manifest_set",
+        "playbook_publish",
+        "playbook_rollback",
+        "playbook_run_candidate",
+        "playbook_get_definition",
+        "playbook_validate",
+        "playbook_dry_run",
+        "playbook_set_autonomy",
+        "playbook_list_available_triggers",
+        # 0.12.0: preflight probes
+        "playbook_preflight",
+        # 0.15.0 (plans/003): on-demand language recall
+        "playbook_language_reference",
+    )
+
+    # 0.25.0 (plans/013, reinstated by plans/020): gated by the
+    # playbook-delegation skill (its own small SkillDef, NOT
+    # playbook-authoring — see _DELEGATION_SKILL_BODY). Both are chat-only
+    # surfaces; the degrade-visible rule for muted turns does not apply.
+    DELEGATION_TOOLS = (
+        "playbook_agent",
+        "playbook_agent_status",
+    )
+
+    def _register_tool(self, ctx: PluginContext, tool_def, handler) -> None:
+        # plans/027 (luna 102/phase9.1): a core that cannot gate must fail
+        # LOUD at load time — the old fallback silently registered all 13
+        # authoring/delegation tools ungated on such cores, defeating the
+        # skill gate with no operator-visible signal.
+        if (
+            tool_def.name in self.AUTHORING_TOOLS
+            or tool_def.name in self.DELEGATION_TOOLS
+        ):
+            if getattr(ctx, "skill_registry", None) is None:
+                raise RuntimeError(
+                    f"plugin-playbooks: cannot register skill-gated tool "
+                    f"{tool_def.name!r} — this core exposes no skill_registry. "
+                    "Upgrade the Luna core (or remove the plugin); refusing to "
+                    "register authoring/delegation tools ungated."
+                )
+            try:
+                ctx.tool_registry.register(
+                    self.manifest.name, tool_def, handler, skill_gated=True
+                )
+                return
+            except TypeError as e:  # older core: no skill_gated kwarg
+                raise RuntimeError(
+                    f"plugin-playbooks: this core's tool registry does not "
+                    f"support skill_gated registration (tool "
+                    f"{tool_def.name!r}). Upgrade the Luna core; refusing to "
+                    "register authoring/delegation tools ungated."
+                ) from e
+        ctx.tool_registry.register(self.manifest.name, tool_def, handler)
+
     def _register_trigger_tools(self, ctx: PluginContext) -> None:
         """Agent-facing trigger discovery — reads the neutral registry."""
         from luna_sdk import ToolDef
@@ -494,20 +1243,24 @@ class PlaybooksPlugin(LunaPlugin):
                     for i in infos
                 ],
                 "note": (
-                    "Put the 'event' value in the playbook's `triggers:` block in the "
-                    "YAML you pass to playbook_propose / playbook_edit. The trigger "
-                    "goes live automatically when the playbook is saved."
+                    "Put the 'event' value in a trigger(...) entry of the playbook's "
+                    "triggers=[...] list in the code you pass to playbook_propose / "
+                    "playbook_edit. The trigger goes live when the playbook "
+                    "is published (playbook_publish)."
                 ),
             }
 
-        ctx.tool_registry.register(
-            self.manifest.name,
+        self._register_tool(
+            ctx,
             ToolDef(
                 name="playbook_list_available_triggers",
+                modes=["planning", "building"],
                 description=(
                     "List external event triggers a playbook can bind to (from "
                     "connected apps that expose triggers — gmail, slack, github...). "
-                    "Returns the exact event name to use in playbook_add_trigger."
+                    "Returns the exact event name to put in the playbook's "
+                    "triggers=[trigger(...)] list via playbook_propose / "
+                    "playbook_edit."
                 ),
                 parameters={
                     "type": "object",
@@ -525,15 +1278,37 @@ class PlaybooksPlugin(LunaPlugin):
             _list_available_triggers,
         )
 
+    # luna 098: the ops chat has no modes — one section, shown whenever the
+    # current chat is the ops chat. Enforcement lives in the publish gates
+    # (021: machine gates + one approval card), not in tool hiding.
+    _OPS_SECTION = (
+        "## Ops chat\n"
+        "You are operating, not building: monitor production playbook "
+        "activity, diagnose failures, and fix them. The full toolset is "
+        "available; the machine-checked publish gates do the enforcing — a "
+        "publish needs a green test run since the draft's last edit "
+        "(playbook_run_candidate) and the owner's approval. Run the test "
+        "first instead of arguing with the gate.\n"
+        "The owner is not an engineer. Anything you write for them — "
+        "`why` arguments, the publish `explanation` — must say in everyday "
+        "language what went wrong, what the change does about it, and how "
+        "it was tested, tied back to the failure that started this work. No "
+        "step ids, stack traces, or internal jargon in the summary; "
+        "technical detail belongs in the collapsed section of the card. One "
+        "fix, one publish, ONE approval card: batch related edits into the "
+        "candidate and publish once, instead of asking per edit."
+    )
+
     async def prompt_sections(self) -> list[str]:
+        # 089 contract #6: the shipped base calls this with no args — the
+        # current chat's kind/state come from the ctx accessors (None when
+        # headless, which keeps the pre-0.26 rendering).
+        from .publish import conversation_kind, conversation_state
+
+        kind = conversation_kind(self._ctx)
+        state = conversation_state(self._ctx)
         if not self._session_factory:
             return []
-
-        # 068/phase003: per-turn read, write-rarely data — factory-scoped TTL
-        # cache; every playbook status write busts it (bust_sections_cache).
-        cached = _sections_cache_get(self._session_factory)
-        if cached is not None:
-            return cached
 
         from sqlalchemy import select
         from .models import Playbook
@@ -547,22 +1322,64 @@ class PlaybooksPlugin(LunaPlugin):
                     Playbook.when_to_use,
                 ).where(Playbook.status == "enabled")
             )).all()
+            # plans/014: failing-playbooks digest — same session, rendered
+            # as its own section below only when non-empty.
+            # A digest failure must not take down the playbook list section.
+            try:
+                digest = await failure_digest(session)
+            except Exception:  # noqa: BLE001
+                logger.exception("playbooks: failure digest query failed")
+                digest = []
+
+        sections: list[str] = []
+        if kind == "ops":
+            sections.append(self._OPS_SECTION)
+
+        # A fresh building chat has no saved rows yet. The list below used to
+        # return early here, hiding all reusable-work guidance precisely when
+        # the owner first asks Luna to establish a repeatable job.
+        if kind != "ops" and state != "planning" and (kind == "building" or state == "building"):
+            sections.append(
+                "## New repeatable work\n"
+                "When the owner asks for a recurring job and no matching saved "
+                "playbook exists, create and test the named playbook before "
+                "processing the whole workload by hand. A small sample can "
+                "validate the workflow; then run the saved process for the "
+                "remaining items. Follow the owner's exact input and output "
+                "schema, verify the persisted results, and confirm the "
+                "required playbook is live before reporting the job complete."
+            )
 
         if not rows:
-            _sections_cache_put(self._session_factory, [])
-            return []
+            return sections
 
         lines = [
             "## Your playbooks (IMPORTANT — read carefully)",
             "Playbooks are your pre-built capabilities. They work like tools "
             "but are multi-step workflows you run with `playbook_run(name, inputs)`.",
             "",
-            "**RULE: When a user's request matches a playbook below, you MUST "
-            "use it. Do NOT do the work manually, do NOT load skills to handle "
-            "it yourself, do NOT build a new workflow. The playbook already "
-            "exists for this exact purpose. Just run it.**",
-            "",
         ]
+        # 089 §5: the "MUST use it" rule is not rendered while planning
+        # (nothing may change the system there) and is softened in building
+        # chats; unknown kind/state (pre-089 core, headless) keeps the
+        # strong rule.
+        if state == "planning":
+            pass
+        elif kind == "building" or state == "building":
+            lines += [
+                "**Prefer running an existing playbook below over redoing "
+                "its work manually — unless the owner is currently editing "
+                "that playbook with you.**",
+                "",
+            ]
+        elif kind != "ops":
+            lines += [
+                "**RULE: When a user's request matches a playbook below, you MUST "
+                "use it. Do NOT do the work manually, do NOT load skills to handle "
+                "it yourself, do NOT build a new workflow. The playbook already "
+                "exists for this exact purpose. Just run it.**",
+                "",
+            ]
         for name, display_name, description, when_to_use in rows:
             parts = [p for p in [description, when_to_use] if p]
             desc = " — ".join(parts) if parts else display_name or name
@@ -570,17 +1387,76 @@ class PlaybooksPlugin(LunaPlugin):
 
         lines += [
             "",
+            "**Reusable summaries**: when the owner asks for a new aggregate "
+            "across repeated job outputs, edit the saved playbook to compute "
+            "it from actual records (delegate the edit if useful), run it, "
+            "and inspect the persisted summary. Hand-copied totals are not "
+            "a reusable process.",
+            "",
+            "**Unattended direct triggers**: a published playbook still "
+            "parks each scheduled fire when its mode is `agent_must_confirm`. "
+            "If the owner explicitly authorized unattended runs, call "
+            "`playbook_set_autonomy(name, 'agent_may_trigger')` through its "
+            "approval gate, verify the stored mode, and test a real fire. "
+            "Trigger creation alone is not proof it will run while the "
+            "owner is away. Keep `manual_only` or per-run confirmation when "
+            "that is what the owner asked for.",
+            "",
             "**Chat delivery**: playbook steps run in the background; an "
             "llm_step/agent_step's output goes to the run record, not the user. "
             "To surface something in the chat, a step must call the "
-            "`send_chat_message` tool — it posts into the conversation the "
-            "run was started from, live.",
+            "`send_chat_message` tool — chat-started and test runs deliver "
+            "to the chat they started from; a triggered/scheduled run must "
+            "name its conversation_id explicitly or the step fails (the ops "
+            "chat carries exceptions only, never routine run output).",
         ]
 
-        sections = ["\n".join(lines)]
-        _sections_cache_put(self._session_factory, sections)
+        sections.append("\n".join(lines))
+        # 089 §5: the failure digest is ops-chat material. It renders in the
+        # ops chat and (unchanged pre-0.26 behavior) when the core doesn't
+        # say which chat this is; building/planning chats stay clean.
+        if kind in (None, "ops"):
+            if failure_section := render_failure_section(digest):
+                sections.append(failure_section)
         return sections
 
+    async def on_server_ready(self) -> None:
+        """0.51.0 (plans/032 phase 06, docs/v2.md §6): continue the v2 runs a
+        restart interrupted. Core awaits this hook sequentially on the
+        serving loop, so the runner only SPAWNS the runs (never awaits them).
+        Not called for runtime installs, where nothing was interrupted."""
+        n = await self._runner.resume_interrupted_runs()
+        logger.info("playbooks: resumed %d interrupted v2 run(s)", n)
+        # plans/032 phase 07: parked rows — rebuild subscriptions/timers, or
+        # resume the ones decided / timed out while the server was down.
+        try:
+            p = await self._runner.park.reconcile()
+            logger.info("playbooks: reconciled %d parked v2 run(s)", p)
+        except Exception:  # noqa: BLE001 — never block the server on it
+            logger.exception("playbooks: park reconcile failed")
+
     async def on_unload(self) -> None:
+        runner = getattr(self, "_runner", None)
+        if runner is not None:
+            runner.park.stop()
+        if self._unsub_publish_guard is not None:
+            try:
+                self._unsub_publish_guard()
+            except Exception:  # noqa: BLE001
+                pass
+            self._unsub_publish_guard = None
+        if self._unsub_publish_decisions is not None:
+            try:
+                self._unsub_publish_decisions()
+            except Exception:  # noqa: BLE001
+                pass
+            self._unsub_publish_decisions = None
+        for task in self._publish_wakes:
+            task.cancel()
+        self._publish_wakes.clear()
         if self._trigger_service:
             await self._trigger_service.stop()
+        if self._fix_proposals:
+            self._fix_proposals.stop()
+        if self._run_wake:
+            self._run_wake.stop()
