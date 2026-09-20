@@ -1,0 +1,28 @@
+{
+  "name": "plugin-chat-ui",
+  "version": "0.30.3",
+  "source_commit": "3ecc933d914555f18512b4176a7fca59773dc617",
+  "core_commit": "887e2fb3c7610236f8ac95d5c8525aa38049a9d5",
+  "sha256": "7ea3545f2f7848d255fec3c1ff148ba6e53b792f47e5b40bca42393c6d25f1a2",
+  "size_bytes": 121727,
+  "files": {
+    "plugin_chat_ui/__init__.py": "298028df94134f8d5e0f5be204f1dbe42af72bfb0a323764ac1614dd9cf65245",
+    "plugin_chat_ui/luna-plugin.toml": "0f09099e397d8c8e0f2368535d6ba15034ad805fd564bdc268f4000011c5b7b5",
+    "plugin_chat_ui/routes.py": "9391cdd018e4883cfb484dd50a214da3060367e6676191a43a78337f66d21a07",
+    "plugin_chat_ui/ui/chat.css": "39c139efc7d40d7dddbfa9d717864740a44a6d79b10ce33fcb4010e92fbf3473",
+    "plugin_chat_ui/ui/chat.js": "d9da5d96b323f84fddf5fe8eb5d9ae983e189043dcef0058c0d904f1e51214db"
+  },
+  "runtime_manifest_verified": true,
+  "deterministic": true,
+  "deploy_changes_chat_only": true,
+  "published_at_check": "2026-09-20T10:31:39.436787+00:00",
+  "deploy_id": "dep-danrbcbtqb8s73csncog",
+  "deploy_status": "live",
+  "previous_version": "0.30.2",
+  "artifact_url": "https://marketplaces.com.ai/mp/official/plugins/plugin-chat-ui/0.30.3/artifact.zip",
+  "plugin_url": "https://marketplaces.com.ai/browse/official/plugin/plugin-chat-ui",
+  "catalog_plugins": 35,
+  "other_plugins_unchanged": 34,
+  "download_matches_local_bytes": true,
+  "detail_page_status": 200
+}
