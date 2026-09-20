@@ -1,0 +1,26 @@
+{
+  "passed": true,
+  "writes": [
+    {
+      "chain": [
+        "openai:gpt-4o",
+        "anthropic:claude-opus-4-6"
+      ],
+      "fallback_policy": "availability",
+      "selection": "manual"
+    },
+    {
+      "chain": [],
+      "selection": "auto"
+    }
+  ],
+  "checks": [
+    "auto default",
+    "manual persists",
+    "auto mode-only write",
+    "auto persists",
+    "mobile menu bounds",
+    "no page errors"
+  ],
+  "provider_calls": "mocked"
+}

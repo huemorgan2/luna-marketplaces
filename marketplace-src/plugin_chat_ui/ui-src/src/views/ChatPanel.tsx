@@ -3711,7 +3711,7 @@ function StatePickerMenu({ kind, value, onChange }: {
 // 008.005: compact reasoning-model picker at the composer bottom-left.
 // Edits the global `reasoning` chain head (same setting as Settings → Models),
 // preserving the fallback tail + policy. User-initiated, ungated.
-function ComposerModelSelect() {
+export function ComposerModelSelect() {
   const [chains, setChains] = useState<ModelChain[] | null>(null)
   const [catalog, setCatalog] = useState<CatalogEntry[] | null>(null)
   const [configured, setConfigured] = useState<string[]>([])
@@ -3753,6 +3753,7 @@ function ComposerModelSelect() {
   const reasoning = chains?.find((c) => c.purpose === 'reasoning')
   const currentFqns = reasoning?.chain.map((e) => `${e.provider}:${e.model}`) ?? []
   const currentHead = currentFqns[0] ?? ''
+  const currentSelection = reasoning?.selection === 'auto' ? 'auto' : currentHead
   const options = (catalog ?? []).map((o) => ({
     ...o,
     unavailable: !configured.includes(o.provider),
@@ -3763,15 +3764,17 @@ function ComposerModelSelect() {
   if (!reasoning || !anyAvailable) return null
 
   async function onChange(fqn: string) {
-    if (!reasoning || fqn === currentHead) return
+    if (!reasoning || fqn === currentSelection) return
     const prev = chains
-    const nextChain = reorderChainHead(currentFqns, fqn)
+    const selection = fqn === 'auto' ? 'auto' : 'manual'
+    const nextChain = selection === 'auto' ? currentFqns : reorderChainHead(currentFqns, fqn)
     // Optimistic head swap.
     setChains((cs) =>
       (cs ?? []).map((c) =>
         c.purpose === 'reasoning'
           ? {
               ...c,
+              selection: c.selection === undefined ? undefined : selection,
               chain: nextChain.map((f) => {
                 const [provider, model] = f.split(':')
                 return { provider, model }
@@ -3782,7 +3785,11 @@ function ComposerModelSelect() {
     )
     setSaving(true)
     try {
-      const res = await api.setModelChain('reasoning', nextChain, reasoning.fallback_policy ?? undefined)
+      const res = await api.setModelChain(
+        'reasoning', selection === 'auto' ? [] : nextChain,
+        selection === 'auto' ? undefined : reasoning.fallback_policy ?? undefined,
+        undefined, reasoning.selection === undefined ? undefined : selection,
+      )
       if (!res.updated) {
         setChains(prev ?? null)
       } else {
@@ -3817,7 +3824,8 @@ function ComposerModelSelect() {
   return (
     <ModelPickerMenu
       options={options}
-      value={currentHead}
+      value={currentSelection}
+      allowAuto={reasoning.selection !== undefined}
       disabled={saving}
       onChange={(fqn) => void onChange(fqn)}
       windowCaps={windowCaps}
