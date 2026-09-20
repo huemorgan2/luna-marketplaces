@@ -16,6 +16,7 @@ from .safety import blocked_reason
 
 DEFAULT_TIMEOUT = 30.0
 MAX_BODY = 100_000  # chars
+MAX_REDIRECTS = 5
 USER_AGENT = "Luna/1.0 (AI Agent; +https://github.com/huemorgan/luna)"
 _METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 
@@ -36,10 +37,6 @@ async def run_request(
     url = (url or "").strip()
     if not url.lower().startswith(("http://", "https://")):
         return {"error": "invalid url", "detail": "URL must start with http:// or https://", "url": url}
-    blocked = blocked_reason(url)
-    if blocked:
-        return {"error": "blocked", "detail": blocked, "url": url}
-
     req_headers = {"User-Agent": USER_AGENT, **(headers or {})}
     content: bytes | None = None
     json_body: Any = None
@@ -61,10 +58,26 @@ async def run_request(
 
         client = shared_client()
     try:
-        resp = await client.request(
-            method, url, headers=req_headers, content=content, json=json_body,
-            timeout=to,
-        )
+        current = url
+        for hop in range(MAX_REDIRECTS + 1):
+            blocked = blocked_reason(current)
+            if blocked:
+                return {"error": "blocked", "detail": blocked, "url": current}
+            resp = await client.request(
+                method, current, headers=req_headers, content=content, json=json_body,
+                timeout=to, follow_redirects=False,
+            )
+            # Do not automatically replay a write against a redirect target.
+            if method not in {"GET", "HEAD"} or resp.status_code not in (301, 302, 303, 307, 308):
+                break
+            location = resp.headers.get("location")
+            if not location:
+                return {"error": "request failed", "detail": "redirect has no location", "url": current, "method": method}
+            current = str(resp.url.join(location))
+            if not current.lower().startswith(("http://", "https://")):
+                return {"error": "blocked", "detail": "redirect uses an unsupported scheme", "url": current}
+            if hop == MAX_REDIRECTS:
+                return {"error": "request failed", "detail": "too many redirects", "url": current, "method": method}
         text = resp.text
         parsed: Any = None
         ctype = resp.headers.get("content-type", "")
@@ -73,14 +86,15 @@ async def run_request(
                 parsed = resp.json()
             except (ValueError, _json.JSONDecodeError):
                 parsed = None
+        structured_too_large = parsed is not None and len(_json.dumps(parsed)) > MAX_BODY
         out: dict[str, Any] = {
             "status": resp.status_code,
             "headers": dict(resp.headers),
             "body": text[:MAX_BODY],
-            "truncated": len(text) > MAX_BODY,
+            "truncated": len(text) > MAX_BODY or structured_too_large,
             "url": str(resp.url),
         }
-        if parsed is not None:
+        if parsed is not None and not structured_too_large:
             out["json"] = parsed
         return out
     except httpx.HTTPError as exc:

@@ -5,20 +5,35 @@ Note: no `from __future__ import annotations` — same Pydantic body fix.
 """
 
 import json
+import logging
+import time
 import uuid
+from types import SimpleNamespace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from luna_sdk import get_current_user
 
-from .definition import PlaybookDef, parse_yaml
-from .models import Playbook, PlaybookDraft, PlaybookRun, PlaybookStepRun, PlaybookVersion
+from .definition import PlaybookDef
+from .models import (
+    Playbook,
+    PlaybookDraft,
+    PlaybookProbeResult,
+    PlaybookRun,
+    PlaybookStepRun,
+    PlaybookVersion,
+)
+from .probes import run_preflight
+from .publish import announce_publish, test_run_gate
+from .versioning import ensure_live_row, live_version_of, mint_version
+from .versioning import get_version_row as _tolerant_get_version_row
 from .validation import validate_definition
 
 # 009.001/phase03: every endpoint requires an authenticated user (router-level
@@ -30,22 +45,11 @@ router = APIRouter(
 )
 
 _session_factory: async_sessionmaker[AsyncSession] | None = None
-
-
-def _bust_sections() -> None:
-    """068/phase003: invalidate the cached playbooks prompt section after a
-    write. Best-effort — a miss just means one TTL-window of staleness."""
-    if _session_factory is None:
-        return
-    try:
-        from . import bust_sections_cache
-
-        bust_sections_cache(_session_factory)
-    except Exception:  # noqa: BLE001
-        pass
 _runner: Any = None
 _events: Any = None
 _sync_bindings: Any = None
+_trigger_sources: Any = None
+_ctx: Any = None
 
 
 def init_routes(
@@ -53,12 +57,17 @@ def init_routes(
     runner: Any,
     events: Any = None,
     sync_bindings: Any = None,
+    trigger_sources: Any = None,
+    ctx: Any = None,
 ) -> None:
-    global _session_factory, _runner, _events, _sync_bindings
+    global _session_factory, _runner, _events, _sync_bindings, _trigger_sources, _ctx
     _session_factory = sf
     _runner = runner
     _events = events
     _sync_bindings = sync_bindings
+    _trigger_sources = trigger_sources
+    _ctx = ctx
+    _reset_icon_cache()
 
 
 async def _notify_changed(name: str) -> None:
@@ -129,6 +138,126 @@ async def serve_ui(path: str):
     return FileResponse(str(target), headers=_NO_CACHE)
 
 
+# --- delegation records, authed (plans/020 phase 2) --------------------------
+# The dojoP bench grades a delegation through its terminal record — the full
+# tool stream (with args + ok) plus the report — over plain HTTP.
+
+
+@router.get("/delegations")
+async def list_delegations(limit: int = 20):
+    from .models import PlaybookDelegation
+
+    limit = max(1, min(int(limit), 100))
+    async with _sf()() as session:
+        rows = (await session.execute(
+            select(PlaybookDelegation)
+            .order_by(PlaybookDelegation.started_at.desc())
+            .limit(limit)
+        )).scalars().all()
+    return {"delegations": [
+        {
+            "id": str(r.id),
+            "task": (r.task or "")[:120],
+            "playbook": r.playbook or None,
+            "status": r.status,
+            "steps_used": r.steps_used,
+            "started_at": r.started_at.isoformat() if r.started_at else None,
+            "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+        }
+        for r in rows
+    ]}
+
+
+@router.get("/delegations/{delegation_id}")
+async def get_delegation(delegation_id: str):
+    from .delegation import _LIVE_FEEDS
+    from .models import PlaybookDelegation
+
+    try:
+        did = uuid.UUID(delegation_id)
+    except ValueError:
+        raise HTTPException(404, "Not found")
+    async with _sf()() as session:
+        row = await session.get(PlaybookDelegation, did)
+    if row is None:
+        raise HTTPException(404, "Not found")
+    events = row.events or []
+    steps_used = row.steps_used
+    feed = _LIVE_FEEDS.get(did)
+    if feed is not None and row.status == "running":
+        events = list(feed.events)
+        steps_used = feed.steps_used
+    return {
+        "id": str(row.id),
+        "task": row.task,
+        "playbook": row.playbook or None,
+        "status": row.status,
+        "steps_used": steps_used,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+        "result": row.result,
+        "events": events,
+    }
+
+
+# --- delegation progress card (plans/013, reinstated by plans/020) ----------
+# UNAUTHED by design: the card lives in a sandboxed srcdoc iframe with an
+# opaque origin — it can send no cookies and no bearer. Access is
+# capability-scoped instead: the random per-delegation token minted at
+# creation, baked into that one card's HTML. Read-only, one delegation.
+_CARD_EVENTS_TAIL = 200
+
+
+@ui_router.get("/delegations/{delegation_id}/card")
+async def delegation_card_status(delegation_id: str, token: str = ""):
+    import secrets as _secrets
+
+    from .delegation import _LIVE_FEEDS, waiting_on_owner
+    from .models import PlaybookDelegation
+
+    try:
+        did = uuid.UUID(delegation_id)
+    except ValueError:
+        raise HTTPException(404, "Not found")
+    async with _sf()() as session:
+        row = await session.get(PlaybookDelegation, did)
+    # One 404 for unknown id AND bad token — no token-validity oracle.
+    if row is None or not _secrets.compare_digest(token or "", row.card_token):
+        raise HTTPException(404, "Not found")
+
+    events = row.events or []
+    steps_used = row.steps_used
+    feed = _LIVE_FEEDS.get(did)
+    if feed is not None and row.status == "running":
+        # The in-process feed is fresher than the 1/s-throttled DB flush.
+        events = list(feed.events)
+        steps_used = feed.steps_used
+    payload = {
+        "status": row.status,
+        "playbook": row.playbook or None,
+        "steps_used": steps_used,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+        "result": row.result if row.status != "running" else None,
+        "events": events[-_CARD_EVENTS_TAIL:],
+        # Parked-on-approval is DERIVED from the feed (a gated call still
+        # unresolved after a few seconds), never a status value.
+        "waiting_for_approval": (
+            waiting_on_owner(events) if row.status == "running" else None
+        ),
+    }
+    return Response(
+        content=json.dumps(payload),
+        media_type="application/json",
+        headers={
+            # The srcdoc iframe fetches from origin "null" — same-origin CORS
+            # never applies. The token IS the access control.
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 def register_routes(app: Any, ctx: Any) -> None:
     app.include_router(router)
     app.include_router(ui_router)
@@ -149,8 +278,46 @@ def register_routes(app: Any, ctx: Any) -> None:
 
         asyncio.create_task(_go())
 
+    # 0.12.0 (plans/002 phase 5): daily re-probe — catch a credential that
+    # died BEFORE a trigger fires into it. Scheduled here for the same
+    # reason as the binding sync: on_load's bootstrap loop dies under
+    # `luna serve`. New failures post a muted "moment" so the agent tells
+    # the owner in chat.
+    async def _reprobe_on_startup() -> None:
+        import asyncio
+
+        from .probes import reprobe_enabled
+
+        async def _loop() -> None:
+            await asyncio.sleep(30)  # let boot settle; first sweep is cheap
+            while True:
+                try:
+                    registry = getattr(_runner, "_tools", None)
+                    alerts = await reprobe_enabled(_sf(), registry)
+                    if alerts and ctx is not None:
+                        lines = "\n".join(
+                            f"- **{a['playbook']}** → `{a['tool']}` "
+                            f"({a['failure_class']}): {a['detail']}"
+                            for a in alerts
+                        )
+                        await ctx.send_muted_message(
+                            title="Playbook preflight found broken tools",
+                            content=(
+                                "The daily connection check found tools that "
+                                "stopped working — these playbooks would fail "
+                                "the next time their trigger fires:\n" + lines
+                            ),
+                            channel="moment",
+                        )
+                except Exception:  # noqa: BLE001 — the sweep must never die
+                    logger.exception("playbooks: re-probe sweep failed")
+                await asyncio.sleep(24 * 3600)
+
+        asyncio.create_task(_loop())
+
     # FastAPI ≥0.136 dropped add_event_handler; the Starlette router list remains.
     app.router.on_startup.append(_sync_bindings_on_startup)
+    app.router.on_startup.append(_reprobe_on_startup)
 
 
 def _sf() -> async_sessionmaker[AsyncSession]:
@@ -158,17 +325,205 @@ def _sf() -> async_sessionmaker[AsyncSession]:
     return _session_factory
 
 
+# ---- Run stats for the list (plans/001) ----
+# The list shows when each playbook last ran and how often it runs. Both come
+# from one grouped, windowed query over playbook_runs — never one query per
+# row, never a scan of the whole run history.
+
+logger = logging.getLogger(__name__)
+
+_STATS_WINDOW_DAYS = 30
+_STATS_TTL_SECONDS = 20.0
+_stats_cache: dict[str, Any] | None = None
+
+
+def _reset_stats_cache() -> None:
+    """Drop the memoised aggregate — used by tests and after a run finishes."""
+    global _stats_cache
+    _stats_cache = None
+
+
+# plans/011: integration-icon reference. Maps every registered tool to its
+# owning plugin and every advertised trigger to its publisher plugin, so the
+# UI can render real integration icons instead of the generic kind glyphs.
+# Registries change only on plugin (un)load — a short TTL keeps this free.
+
+_ICON_TTL_SECONDS = 300.0
+_icon_cache: dict[str, Any] | None = None
+
+
+def _reset_icon_cache() -> None:
+    global _icon_cache
+    _icon_cache = None
+
+
+async def build_icon_reference(tool_registry: Any, trigger_sources: Any) -> dict[str, Any]:
+    """Assemble {tools: {name: plugin}, triggers: [...]}. Never raises —
+    an unavailable registry just yields an empty section."""
+    tools: dict[str, str] = {}
+    try:
+        for rt in (tool_registry.all() if tool_registry is not None else []):
+            plugin = getattr(rt, "plugin", None)
+            name = getattr(getattr(rt, "definition", None), "name", None)
+            if name and plugin:
+                tools[name] = plugin
+    except Exception as e:  # noqa: BLE001
+        logger.warning("playbooks: icon reference tool scan failed: %s", e)
+
+    triggers: list[dict[str, Any]] = []
+    if trigger_sources is not None:
+        # The registry keys sources by owning plugin; build source→plugin so a
+        # trigger resolves to the plugin whose icon represents it.
+        source_plugin: dict[str, str] = {}
+        for plugin_name, sources in getattr(trigger_sources, "_by_plugin", {}).items():
+            for s in sources:
+                src = getattr(s, "source_name", None)
+                if src:
+                    source_plugin[src] = plugin_name
+        try:
+            infos = await trigger_sources.all_triggers()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("playbooks: icon reference trigger scan failed: %s", e)
+            infos = []
+        for i in infos:
+            triggers.append({
+                "event_pattern": i.event_pattern,
+                "source": i.source,
+                "app": i.app,
+                "label": i.label,
+                "plugin": source_plugin.get(i.source),
+            })
+    return {"tools": tools, "triggers": triggers}
+
+
+@router.get("/reference/icons")
+async def icon_reference():
+    global _icon_cache
+    now = time.monotonic()
+    if _icon_cache is not None and now - _icon_cache["at"] < _ICON_TTL_SECONDS:
+        return _icon_cache["payload"]
+    tool_registry = getattr(_runner, "_tools", None)
+    payload = await build_icon_reference(tool_registry, _trigger_sources)
+    _icon_cache = {"at": now, "payload": payload}
+    return payload
+
+
+def _aware(dt: datetime | None) -> datetime | None:
+    """SQLite hands back naive datetimes; treat those as UTC."""
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+# 0.10.0 (plans/002 phase 3): candidate/live plumbing (mirrors agent_tools).
+# `version` is the monotonic counter; live content sits on the playbook row
+# at version `live_version` (0 = "same as version" on pre-0.10 rows); the one
+# un-promoted candidate is a playbook_versions row named by `candidate_version`.
+
+def _live_version_of(p: Playbook) -> int | None:
+    # plans/032 phase 04: one implementation (versioning.live_version_of);
+    # None = candidate-only row, nothing live yet.
+    return live_version_of(p)
+
+
+async def _get_version_row(
+    session: AsyncSession, p: Playbook, n: int,
+) -> PlaybookVersion | None:
+    return await _tolerant_get_version_row(session, p, n)
+
+
+async def _ensure_live_row(session: AsyncSession, p: Playbook) -> PlaybookVersion | None:
+    """Guarantee a version row exists for the current live content (None
+    when nothing is live)."""
+    return await ensure_live_row(session, p)
+
+
+def _runs_per_day(runs: int, created_at: datetime | None, now: datetime) -> float:
+    """Runs per day over the days the playbook actually existed in the window.
+
+    A playbook created yesterday that ran four times reads 4.0/day, not 0.1/day.
+    """
+    window_start = now - timedelta(days=_STATS_WINDOW_DAYS)
+    created = _aware(created_at) or window_start
+    days = (now - max(created, window_start)).total_seconds() / 86400.0
+    days = min(max(days, 1.0), float(_STATS_WINDOW_DAYS))
+    return round(runs / days, 1)
+
+
+async def _run_stats(session: AsyncSession, playbooks: list) -> dict[str, dict[str, Any]]:
+    """`{playbook_id: {last_run_at, runs_per_day, runs_window}}` for a list page.
+
+    Two queries at most, both grouped and both index-range scans:
+      1. every playbook that ran inside the window (one round trip, all rows);
+      2. the last run of the playbooks missing from (1), restricted to those
+         ids — skipped when every playbook ran recently.
+    Results are memoised for `_STATS_TTL_SECONDS`, so repeated mounts of the
+    pane cost nothing. Stats trail reality by design; 20s is invisible.
+    """
+    global _stats_cache
+    now = datetime.now(timezone.utc)
+    cache = _stats_cache
+    if cache is None or (time.monotonic() - cache["at"]) > _STATS_TTL_SECONDS:
+        rows = (await session.execute(
+            select(
+                PlaybookRun.playbook_id,
+                func.count(PlaybookRun.id),
+                func.max(PlaybookRun.started_at),
+            )
+            .where(PlaybookRun.started_at >= now - timedelta(days=_STATS_WINDOW_DAYS))
+            .group_by(PlaybookRun.playbook_id)
+        )).all()
+        cache = {
+            "at": time.monotonic(),
+            "recent": {str(pid): (count, last) for pid, count, last in rows},
+            # Playbooks with nothing in the window; resolved lazily, and
+            # remembered as None when they have never run at all.
+            "idle": {},
+        }
+        _stats_cache = cache
+
+    recent, idle = cache["recent"], cache["idle"]
+    unknown = [
+        p.id for p in playbooks
+        if str(p.id) not in recent and str(p.id) not in idle
+    ]
+    if unknown:
+        rows = (await session.execute(
+            select(PlaybookRun.playbook_id, func.max(PlaybookRun.started_at))
+            .where(PlaybookRun.playbook_id.in_(unknown))
+            .group_by(PlaybookRun.playbook_id)
+        )).all()
+        found = {str(pid): last for pid, last in rows}
+        for pid in unknown:
+            idle[str(pid)] = found.get(str(pid))
+
+    out: dict[str, dict[str, Any]] = {}
+    for p in playbooks:
+        key = str(p.id)
+        if key in recent:
+            count, last = recent[key]
+        else:
+            count, last = 0, idle.get(key)
+        last = _aware(last)
+        out[key] = {
+            "last_run_at": last.isoformat() if last else None,
+            "runs_window": count,
+            "runs_per_day": _runs_per_day(count, getattr(p, "created_at", None), now),
+        }
+    return out
+
+
 class PlaybookCreate(BaseModel):
     name: str
     display_name: str = ""
     description: str = ""
     when_to_use: str = ""
-    definition_yaml: str
+    definition: dict[str, Any]
     agent_autonomy: str = "agent_must_confirm"
 
 
 class PlaybookUpdate(BaseModel):
-    definition_yaml: str
+    definition: dict[str, Any]
     message: str = ""
 
 
@@ -176,9 +531,52 @@ class AutonomyPatch(BaseModel):
     agent_autonomy: str
 
 
+class PublishSettingsPatch(BaseModel):
+    # plans/016 phase 6: Settings → Publish switch; omitted = unchanged.
+    require_run: bool | None = None
+
+
 class RunCreate(BaseModel):
     inputs: dict[str, Any] = {}
     trigger: str = "api"
+
+
+async def _trust_summaries(session, playbook_ids):
+    """Phase 6: per-playbook trust data for the list badges — batched
+    GROUP BY queries (probes), never N+1."""
+    trust: dict[str, dict[str, Any]] = {
+        str(pid): {
+            "probes": {"total": 0, "failed": 0, "probed_at": None},
+        }
+        for pid in playbook_ids
+    }
+    if not playbook_ids:
+        return trust
+    probe_rows = (await session.execute(
+        select(
+            PlaybookProbeResult.playbook_id,
+            func.count(PlaybookProbeResult.id),
+            func.max(PlaybookProbeResult.probed_at),
+        )
+        .where(PlaybookProbeResult.playbook_id.in_(playbook_ids))
+        .group_by(PlaybookProbeResult.playbook_id)
+    )).all()
+    probe_failed = (await session.execute(
+        select(PlaybookProbeResult.playbook_id, func.count(PlaybookProbeResult.id))
+        .where(
+            PlaybookProbeResult.playbook_id.in_(playbook_ids),
+            PlaybookProbeResult.status == "failed",
+        )
+        .group_by(PlaybookProbeResult.playbook_id)
+    )).all()
+    failed_probes = {str(pid): n for pid, n in probe_failed}
+    for pid, total, probed_at in probe_rows:
+        trust[str(pid)]["probes"] = {
+            "total": total,
+            "failed": failed_probes.get(str(pid), 0),
+            "probed_at": probed_at.isoformat() if probed_at else None,
+        }
+    return trust
 
 
 @router.get("/playbooks")
@@ -190,7 +588,25 @@ async def list_playbooks(status: str = "active"):
         elif status != "all":
             stmt = stmt.where(Playbook.status == status)
         rows = (await session.execute(stmt)).scalars().all()
+        try:
+            stats = await _run_stats(session, list(rows))
+        except Exception as e:  # pragma: no cover - depends on the DB
+            # Run history is a nice-to-have on this screen; never let it stop
+            # the list from rendering.
+            logger.warning("playbooks: run stats unavailable: %s", e)
+            stats = {}
+        try:
+            trust = await _trust_summaries(session, [p.id for p in rows])
+        except Exception as e:  # pragma: no cover - same posture as stats
+            logger.warning("playbooks: trust summaries unavailable: %s", e)
+            trust = {}
         return [{
+            "trust": {
+                **trust.get(str(p.id), {
+                    "probes": {"total": 0, "failed": 0, "probed_at": None},
+                }),
+                "manifest_present": bool((p.manifest or "").strip()),
+            },
             "id": str(p.id),
             "name": p.name,
             "display_name": p.display_name,
@@ -198,9 +614,15 @@ async def list_playbooks(status: str = "active"):
             "when_to_use": p.when_to_use,
             "status": p.status,
             "agent_autonomy": p.agent_autonomy,
+            "format": p.format,  # plans/032 phase 04
             "version": p.version,
+            "live_version": _live_version_of(p),
+            "candidate_version": p.candidate_version,
             "cost_estimate_cents": p.cost_estimate_cents,
             "duration_estimate_ms": p.duration_estimate_ms,
+            **stats.get(str(p.id), {
+                "last_run_at": None, "runs_window": 0, "runs_per_day": 0.0,
+            }),
         } for p in rows]
 
 
@@ -212,6 +634,13 @@ async def get_playbook(name: str):
         )).scalar_one_or_none()
         if not p:
             raise HTTPException(404, f"Playbook '{name}' not found")
+        candidate_definition = None
+        candidate_code = None
+        if p.candidate_version:
+            cand = await _get_version_row(session, p, p.candidate_version)
+            if cand is not None:
+                candidate_definition = cand.definition
+                candidate_code = cand.code
         return {
             "id": str(p.id),
             "name": p.name,
@@ -219,24 +648,31 @@ async def get_playbook(name: str):
             "description": p.description,
             "when_to_use": p.when_to_use,
             "definition": p.definition,
+            "code": p.code,
+            "format": p.format,  # plans/032 phase 04: the UI picks its view by it
+            "manifest": p.manifest,
             "inputs_schema": p.inputs_schema,
             "status": p.status,
             "agent_autonomy": p.agent_autonomy,
+            "publish_require_run": p.publish_require_run,
             "version": p.version,
+            "live_version": _live_version_of(p),
+            "candidate_version": p.candidate_version,
+            "candidate_definition": candidate_definition,
+            "candidate_code": candidate_code,
         }
 
 
 @router.post("/playbooks")
 async def create_playbook(body: PlaybookCreate):
     try:
-        pb_def = parse_yaml(body.definition_yaml)
+        pb_def = PlaybookDef.model_validate(body.definition)
     except Exception as e:
-        raise HTTPException(400, f"Invalid YAML: {e}")
+        raise HTTPException(400, f"Invalid definition: {e}")
 
-    import yaml as _yaml
     tool_registry = getattr(_runner, "_tools", None)
     issues = validate_definition(
-        _yaml.safe_load(body.definition_yaml),
+        body.definition,
         tool_registry=tool_registry, check_unknown_keys=True,
     )
     errors = [i.to_dict() for i in issues if i.severity == "error"]
@@ -250,6 +686,11 @@ async def create_playbook(body: PlaybookCreate):
         if existing:
             raise HTTPException(409, f"Playbook '{body.name}' already exists")
 
+        try:
+            from .pblang import generate_code
+            _code = generate_code(pb_def)
+        except Exception:  # noqa: BLE001
+            _code = None
         p = Playbook(
             name=body.name,
             display_name=body.display_name or pb_def.display_name or body.name,
@@ -257,13 +698,14 @@ async def create_playbook(body: PlaybookCreate):
             when_to_use=body.when_to_use or pb_def.when_to_use,
             inputs_schema=pb_def.inputs,
             definition=pb_def.model_dump(mode="json", exclude_none=True, by_alias=True),
+            code=_code,
+            live_version=1,  # a brand-new playbook goes live directly
             agent_autonomy=body.agent_autonomy,
             created_by="owner",
             status="enabled",
         )
         session.add(p)
         await session.commit()
-        _bust_sections()
         await session.refresh(p)
     await _notify_changed(body.name)
     return {"id": str(p.id), "name": p.name, "status": "created"}
@@ -272,9 +714,9 @@ async def create_playbook(body: PlaybookCreate):
 @router.put("/playbooks/{name}")
 async def update_playbook(name: str, body: PlaybookUpdate):
     try:
-        pb_def = parse_yaml(body.definition_yaml)
+        pb_def = PlaybookDef.model_validate(body.definition)
     except Exception as e:
-        raise HTTPException(400, f"Invalid YAML: {e}")
+        raise HTTPException(400, f"Invalid definition: {e}")
 
     async with _sf()() as session:
         p = (await session.execute(
@@ -283,21 +725,31 @@ async def update_playbook(name: str, body: PlaybookUpdate):
         if not p:
             raise HTTPException(404, f"Playbook '{name}' not found")
 
-        session.add(PlaybookVersion(
-            playbook_id=p.id,
-            version=p.version,
-            definition=p.definition,
-            author="owner",
-            message=body.message or "REST update",
-        ))
+        # 0.10.0: the owner edits LIVE directly (the UI is the owner) — record
+        # the old live content, then create a row for the new live version.
+        # Never snapshot at the counter: a pending candidate may own that
+        # number, and version numbers must stay unique.
+        await _ensure_live_row(session, p)
         p.definition = pb_def.model_dump(mode="json", exclude_none=True, by_alias=True)
-        p.version += 1
+        # 0.8.0: a definition write invalidates any stored pblang code —
+        # regenerate (or NULL it so reads derive fresh; stale code must never
+        # survive).
+        try:
+            from .pblang import generate_code
+            p.code = generate_code(pb_def)
+        except Exception:  # noqa: BLE001
+            p.code = None
+        await mint_version(
+            session, p,
+            definition=p.definition, code=p.code, manifest=p.manifest,
+            author="owner", message=body.message or "REST update",
+        )
+        p.live_version = p.version
         p.description = pb_def.description or p.description
         p.when_to_use = pb_def.when_to_use or p.when_to_use
         p.display_name = pb_def.display_name or p.display_name
         p.inputs_schema = pb_def.inputs
         await session.commit()
-        _bust_sections()
         version = p.version
     await _notify_changed(name)
     return {"name": name, "version": version, "status": "updated"}
@@ -313,7 +765,6 @@ async def enable_playbook(name: str):
             raise HTTPException(404)
         p.status = "enabled"
         await session.commit()
-        _bust_sections()
     await _notify_changed(name)
     return {"name": name, "status": "enabled"}
 
@@ -328,7 +779,6 @@ async def disable_playbook(name: str):
             raise HTTPException(404)
         p.status = "disabled"
         await session.commit()
-        _bust_sections()
     await _notify_changed(name)
     return {"name": name, "status": "disabled"}
 
@@ -354,7 +804,6 @@ async def patch_playbook(name: str, body: PlaybookPatch):
         if body.description is not None:
             p.description = body.description
         await session.commit()
-        _bust_sections()
         status_out = p.status
     await _notify_changed(name)
     return {"name": name, "status": status_out}
@@ -374,8 +823,27 @@ async def patch_autonomy(name: str, body: AutonomyPatch):
             raise HTTPException(404)
         p.agent_autonomy = body.agent_autonomy
         await session.commit()
-        _bust_sections()
         return {"name": name, "agent_autonomy": body.agent_autonomy}
+
+
+@router.patch("/playbooks/{name}/publish-settings")
+async def patch_publish_settings(name: str, body: PublishSettingsPatch):
+    """plans/016 phase 6: owner-switchable publish gate."""
+    if body.require_run is None:
+        raise HTTPException(400, "Nothing to change — pass require_run")
+    async with _sf()() as session:
+        p = (await session.execute(
+            select(Playbook).where(Playbook.name == name)
+        )).scalar_one_or_none()
+        if not p:
+            raise HTTPException(404)
+        if body.require_run is not None:
+            p.publish_require_run = body.require_run
+        await session.commit()
+        return {
+            "name": name,
+            "publish_require_run": p.publish_require_run,
+        }
 
 
 @router.delete("/playbooks/{name}")
@@ -388,9 +856,31 @@ async def archive_playbook(name: str):
             raise HTTPException(404)
         p.status = "archived"
         await session.commit()
-        _bust_sections()
     await _notify_changed(name)
     return {"name": name, "status": "archived"}
+
+
+@router.delete("/playbooks/{name}/purge")
+async def purge_playbook(name: str):
+    """plans/017: hard-delete an ARCHIVED playbook and its version rows —
+    two explicit steps to destroy history (archive first, then purge)."""
+    async with _sf()() as session:
+        p = (await session.execute(
+            select(Playbook).where(Playbook.name == name)
+        )).scalar_one_or_none()
+        if not p:
+            raise HTTPException(404)
+        if p.status != "archived":
+            raise HTTPException(
+                409, f"Playbook '{name}' is not archived — archive it first, then purge"
+            )
+        await session.execute(
+            delete(PlaybookVersion).where(PlaybookVersion.playbook_id == p.id)
+        )
+        await session.delete(p)
+        await session.commit()
+    await _notify_changed(name)
+    return {"name": name, "status": "purged"}
 
 
 @router.post("/playbooks/{name}/runs")
@@ -405,12 +895,17 @@ async def start_run(name: str, body: RunCreate):
         if not p:
             raise HTTPException(404, f"Playbook '{name}' not found")
 
-    run = await _runner.start_run(p, inputs=body.inputs, trigger=body.trigger)
+    # plans/009: background start — the Run button responds instantly instead
+    # of hanging for the whole run; liveness comes from activity.* heartbeats.
+    run = await _runner.start_run_background(p, inputs=body.inputs, trigger=body.trigger)
+    _reset_stats_cache()  # a run the owner just started should show as "now"
     return {"run_id": str(run.id), "status": run.status}
 
 
 @router.get("/playbooks/{name}/runs")
-async def list_runs(name: str):
+async def list_runs(name: str, version: int | None = None):
+    """Runs newest first; `?version=N` narrows to runs of that version
+    (plans/016: the Versions tab shows runs per version)."""
     async with _sf()() as session:
         p = (await session.execute(
             select(Playbook).where(Playbook.name == name)
@@ -418,16 +913,23 @@ async def list_runs(name: str):
         if not p:
             raise HTTPException(404)
 
+        q = select(PlaybookRun).where(PlaybookRun.playbook_id == p.id)
+        if version is not None:
+            q = q.where(PlaybookRun.playbook_version == version)
         runs = (await session.execute(
-            select(PlaybookRun).where(PlaybookRun.playbook_id == p.id).order_by(PlaybookRun.started_at.desc())
+            q.order_by(PlaybookRun.started_at.desc())
         )).scalars().all()
 
         return [{
             "id": str(r.id),
             "status": r.status,
             "trigger": r.trigger,
+            "playbook_version": r.playbook_version,
             "started_at": r.started_at.isoformat() if r.started_at else None,
             "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+            # plans/032 phase 08
+            "format": getattr(r, "format", None) or "pblang",
+            "result": getattr(r, "result", None),
         } for r in runs]
 
 
@@ -444,11 +946,15 @@ async def get_run(run_id: str):
             .order_by(PlaybookStepRun.started_at)
         )).scalars().all()
 
-        return {
+        payload: dict[str, Any] = {
             "id": str(run.id),
             "status": run.status,
             "trigger": run.trigger,
+            "playbook_version": run.playbook_version,
             "inputs": run.inputs,
+            # plans/032 phase 08
+            "format": getattr(run, "format", None) or "pblang",
+            "result": getattr(run, "result", None),
             "steps": [{
                 "step_id": s.step_id,
                 "kind": s.step_kind,
@@ -462,6 +968,23 @@ async def get_run(run_id: str):
                 "completed_at": s.completed_at.isoformat() if s.completed_at else None,
             } for s in steps],
         }
+    # plans/032 phase 10 (docs/v2.md §6): a journaled run carries its trace —
+    # one row per effect occurrence keyed on the graph's `step-<call_site_id>`
+    # — plus the run-level error triple and the failed line. A run without
+    # journal rows (every pblang run) keeps the pre-phase-10 payload exactly.
+    from .v2.graph import parse_failed_line, trace_rows
+    from .v2.journal_db import DbJournalStore
+
+    try:
+        entries = await DbJournalStore(_sf()).read(str(run.id))
+    except KeyError:
+        return payload
+    payload["trace"] = trace_rows(entries)
+    payload["error"] = getattr(run, "error", None)
+    payload["error_type"] = getattr(run, "error_type", None)
+    payload["traceback"] = getattr(run, "traceback", None)
+    payload["failed_line"] = parse_failed_line(payload["error"])
+    return payload
 
 
 @router.post("/playbooks/runs/{run_id}/cancel")
@@ -502,17 +1025,25 @@ async def list_versions(name: str):
         for ver_num, cnt in rows:
             run_counts[ver_num] = cnt
 
-        current_runs = run_counts.get(p.version, 0)
-
-        result = [{
-            "version": p.version,
-            "title": "",
-            "author": "",
-            "created_at": p.updated_at.isoformat(),
-            "runs": current_runs,
-            "promoted_from": None,
-            "current": True,
-        }]
+        # 0.10.0: rows are the history; live/candidate are pointers into it.
+        # Legacy playbooks may lack a row for the current live version — the
+        # synthesized entry covers that gap only (no duplicates).
+        live_n = _live_version_of(p)
+        result = []
+        # plans/032 phase 04: a candidate-only row has nothing live to
+        # synthesize.
+        if live_n is not None and not any(v.version == live_n for v in versions):
+            result.append({
+                "version": live_n,
+                "title": "",
+                "author": "",
+                "created_at": p.updated_at.isoformat(),
+                "runs": run_counts.get(live_n, 0),
+                "promoted_from": None,
+                "current": True,
+                "live": True,
+                "candidate": False,
+            })
 
         for v in versions:
             result.append({
@@ -522,19 +1053,149 @@ async def list_versions(name: str):
                 "created_at": v.created_at.isoformat(),
                 "runs": run_counts.get(v.version, 0),
                 "promoted_from": v.promoted_from,
-                "current": False,
+                "current": v.version == live_n,
+                "live": v.version == live_n,
+                "candidate": v.version == p.candidate_version,
             })
 
+        result.sort(key=lambda r: r["version"], reverse=True)
         return result
 
 
+@router.get("/playbooks/{name}/versions/{n}")
+async def get_version(name: str, n: int):
+    """One version's full content — what the Versions tab renders on the
+    left (plans/016). Stored rows are served as-is; the legacy live version
+    without a row (see `list_versions`) is served from the Playbook row."""
+    from sqlalchemy import func as sa_func
+
+    async with _sf()() as session:
+        p = (await session.execute(
+            select(Playbook).where(Playbook.name == name)
+        )).scalar_one_or_none()
+        if not p:
+            raise HTTPException(404, f"Playbook '{name}' not found")
+        live_n = _live_version_of(p)
+        row = await _get_version_row(session, p, n)
+        if row is None and (live_n is None or n != live_n):
+            raise HTTPException(404, f"Version {n} of '{name}' not found")
+        runs = (await session.execute(
+            select(sa_func.count()).select_from(PlaybookRun).where(
+                PlaybookRun.playbook_id == p.id,
+                PlaybookRun.playbook_version == n,
+            )
+        )).scalar_one()
+        if row is None:
+            return {
+                "version": live_n,
+                "definition": p.definition,
+                "code": p.code,
+                "manifest": p.manifest,
+                "author": "",
+                "message": "",
+                "created_at": p.updated_at.isoformat(),
+                "promoted_from": None,
+                "live": True,
+                "candidate": False,
+                "runs": runs,
+                # plans/032 phase 10: the language of this version's code
+                "format": getattr(p, "format", None) or "pblang",
+            }
+        return {
+            "version": row.version,
+            "definition": row.definition,
+            "code": row.code,
+            "manifest": row.manifest,
+            "author": row.author,
+            "message": row.message,
+            "created_at": row.created_at.isoformat(),
+            "promoted_from": row.promoted_from,
+            "live": row.version == live_n,
+            "candidate": row.version == p.candidate_version,
+            "runs": runs,
+            "format": getattr(row, "format", None) or "pblang",
+        }
+
+
+@router.get("/playbooks/{name}/graph")
+async def get_graph(name: str, version: Optional[int] = None):
+    """plans/032 phase 10 (master §2 Canvas): the block tree of a python
+    version's `async def run`, derived from the code on the server — node ids
+    are the checker's call-site ids (`step-<id>`), so the Versions tab can
+    project a run's journal onto them. `version` defaults to the live version,
+    else the candidate. A pblang version answers 409: the canvas builds pblang
+    graphs client-side from the definition, as before."""
+    from .v2.checker import check
+    from .v2.graph import build_graph
+
+    async with _sf()() as session:
+        p = (await session.execute(
+            select(Playbook).where(Playbook.name == name)
+        )).scalar_one_or_none()
+        if not p:
+            raise HTTPException(404, f"Playbook '{name}' not found")
+        live_n = _live_version_of(p)
+        n = version if version is not None else (live_n or p.candidate_version)
+        if n is None:
+            raise HTTPException(404, f"Playbook '{name}' has no version")
+        row = await _get_version_row(session, p, n)
+        if row is None and (live_n is None or n != live_n):
+            raise HTTPException(404, f"Version {n} of '{name}' not found")
+        fmt = (getattr(row, "format", None) if row is not None else None) or p.format or "pblang"
+        definition = (row.definition if row is not None else p.definition) or {}
+        code = (row.code if row is not None else p.code) or ""
+    if fmt != "python":
+        return JSONResponse(
+            status_code=409,
+            content={"error": f"version {n} of '{name}' is {fmt} — the canvas builds "
+                              f"{fmt} graphs client-side"},
+        )
+    call_sites = definition.get("call_sites") if isinstance(definition, dict) else None
+    if call_sites is None:
+        call_sites = check(code, name=name, version=n).summary.get("call_sites") or []
+    return build_graph(
+        code, name=name, version=n, triggers=definition.get("triggers") or [],
+        call_sites=call_sites,
+    )
+
+
 class PromoteBody(BaseModel):
-    version: int
+    # None → promote the CANDIDATE through the gate; a number → owner-restore
+    # that stored version to live (pointer move, no gate beyond existence).
+    version: int | None = None
+
+
+def _apply_row_to_live(p: Playbook, row: PlaybookVersion, *, restore_manifest: bool) -> None:
+    """Make a version row's content the live content (pointer + fields)."""
+    defn = dict(row.definition)
+    defn["name"] = p.name
+    p.definition = defn
+    p.code = row.code
+    # plans/022 P6: a row with NO manifest never NULLs the live manifest —
+    # during the meltdown a restore promoted a NULL-manifest row and wiped
+    # the live manifest.
+    if restore_manifest and row.manifest:
+        p.manifest = row.manifest
+    p.description = defn.get("description") or p.description
+    p.when_to_use = defn.get("when_to_use") or p.when_to_use
+    p.display_name = defn.get("display_name") or p.display_name
+    p.inputs_schema = defn.get("inputs")
+    p.live_version = row.version
+    # phase 08: the promoted row's language becomes the live format
+    if getattr(row, "format", None):
+        p.format = row.format
 
 
 @router.post("/playbooks/{name}/promote")
 async def promote_version(name: str, body: PromoteBody):
-    """Promote an old version's definition to become the active one."""
+    """0.10.0: pointer semantics — no new version numbers are minted.
+
+    Without a version: promote the pending CANDIDATE. With a version:
+    owner-restore that stored version to live. 021: the owner is never
+    blocked on test-run evidence — their click is the consent (the UI
+    shows the evidence state first). Static validation and probes
+    still refuse: a structurally broken playbook cannot go live.
+    """
     async with _sf()() as session:
         p = (await session.execute(
             select(Playbook).where(Playbook.name == name)
@@ -542,42 +1203,268 @@ async def promote_version(name: str, body: PromoteBody):
         if not p:
             raise HTTPException(404, f"Playbook '{name}' not found")
 
-        old_ver = (await session.execute(
-            select(PlaybookVersion)
-            .where(
-                PlaybookVersion.playbook_id == p.id,
-                PlaybookVersion.version == body.version,
+        target_n = body.version
+        candidate = target_n is None
+        if candidate:
+            if not p.candidate_version:
+                raise HTTPException(409, f"'{name}' has no candidate to promote")
+            target_n = p.candidate_version
+
+        row = await _get_version_row(session, p, target_n)
+        if not row:
+            raise HTTPException(404, f"Version {target_n} not found")
+
+        if candidate:
+            # THE GATE (extensible — the probes gate plugs in here, phase 5).
+            issues = validate_definition(
+                row.definition,
+                tool_registry=getattr(_runner, "_tools", None),
+                check_unknown_keys=False,
             )
-        )).scalar_one_or_none()
-        if not old_ver:
-            raise HTTPException(404, f"Version {body.version} not found")
+            errors = [i.to_dict() for i in issues if i.severity == "error"]
+            if errors:
+                raise HTTPException(422, {
+                    "message": "Promote refused — gate 'static_validation' failed",
+                    "gate": "static_validation",
+                    "issues": errors,
+                })
+            # 0.12.0: probes gate — no tool the candidate touches may be
+            # KNOWN-broken (unprobeable tools pass; see probes.py).
+            probe_summary = await run_preflight(
+                session, getattr(_runner, "_tools", None), p,
+                row.definition or {},
+            )
+            if probe_summary["failed"]:
+                await session.commit()  # persist the probe cache rows
+                failing = [
+                    r for r in probe_summary["results"]
+                    if r["status"] == "failed"
+                ]
+                broken = "; ".join(
+                    f"{r['tool']} — {r['detail']}" for r in failing
+                )
+                raise HTTPException(422, {
+                    "message": (
+                        "Promote refused — a tool this playbook uses is "
+                        f"broken: {broken}"
+                    ),
+                    "gate": "probes",
+                    "failing_tools": failing,
+                })
 
-        session.add(PlaybookVersion(
-            playbook_id=p.id,
-            version=p.version,
-            definition=p.definition,
-            author="owner",
-            message=f"before promoting v{body.version}",
-            promoted_from=body.version,
-        ))
+        # 021: test-run evidence is looked up for the announce message but
+        # never blocks the owner. Restores accept live history as evidence.
+        # plans/022 P1: a failed latest run is announced as a failure, never
+        # in the evidence slot.
+        _gate, _refusal, ev_run, failed_run = await test_run_gate(
+            session, p.id, row.version, row.created_at,
+            include_live=not candidate,
+            require=False,
+        )
+        evidence = (
+            SimpleNamespace(id=ev_run.id, completed_at=ev_run.completed_at)
+            if ev_run is not None else None
+        )
+        failed_ref = (
+            SimpleNamespace(id=failed_run.id, completed_at=failed_run.completed_at)
+            if failed_run is not None else None
+        )
 
-        p.definition = old_ver.definition
-        p.version += 1
-
-        pb_def = PlaybookDef.model_validate(old_ver.definition)
-        p.description = pb_def.description
-        p.when_to_use = pb_def.when_to_use
-        p.display_name = pb_def.display_name or p.display_name
-        p.inputs_schema = pb_def.inputs
+        old_live = _live_version_of(p)
+        await _ensure_live_row(session, p)
+        # plans/033: a candidate row carries its own manifest
+        # (playbook_manifest_set saves a candidate) — promote applies it, as
+        # a restore does. A row with no manifest keeps live's.
+        _apply_row_to_live(p, row, restore_manifest=True)
+        row.promoted_from = old_live  # rollback lineage
+        if p.candidate_version == target_n:
+            p.candidate_version = None
 
         await session.commit()
-        _bust_sections()
-        return {
+        result = {
             "name": name,
+            "live_version": target_n,
             "version": p.version,
-            "promoted_from": body.version,
+            "promoted_from": old_live,
             "status": "promoted",
         }
+    await _notify_changed(name)
+    if _events is not None:
+        await announce_publish(
+            _ctx, _events, name=name, old_version=old_live,
+            new_version=target_n, evidence=evidence, actor="owner",
+            failed_run=failed_ref,
+        )
+    return result
+
+
+@router.post("/playbooks/{name}/rollback")
+async def rollback_playbook(name: str):
+    """Restore the previous live version (the one live was promoted from)."""
+    async with _sf()() as session:
+        p = (await session.execute(
+            select(Playbook).where(Playbook.name == name)
+        )).scalar_one_or_none()
+        if not p:
+            raise HTTPException(404, f"Playbook '{name}' not found")
+
+        live_n = _live_version_of(p)
+        live_row = await _get_version_row(session, p, live_n)
+        target_n = live_row.promoted_from if live_row else None
+        if not target_n:
+            from sqlalchemy import func as sa_func
+            target_n = (await session.execute(
+                select(sa_func.max(PlaybookVersion.version)).where(
+                    PlaybookVersion.playbook_id == p.id,
+                    PlaybookVersion.version < live_n,
+                )
+            )).scalar()
+        if not target_n:
+            raise HTTPException(409, f"'{name}' has no previous version to roll back to")
+        row = await _get_version_row(session, p, target_n)
+        if not row:
+            raise HTTPException(404, f"No stored content for version {target_n}")
+
+        # 021: rollback is the owner's escape hatch — test-run evidence is
+        # recorded but never blocks.
+        _gate, _refusal, ev_run, failed_run = await test_run_gate(
+            session, p.id, row.version, row.created_at, include_live=True,
+            require=False,
+        )
+        evidence = (
+            SimpleNamespace(id=ev_run.id, completed_at=ev_run.completed_at)
+            if ev_run is not None else None
+        )
+        failed_ref = (
+            SimpleNamespace(id=failed_run.id, completed_at=failed_run.completed_at)
+            if failed_run is not None else None
+        )
+
+        await _ensure_live_row(session, p)
+        _apply_row_to_live(p, row, restore_manifest=True)
+        await session.commit()
+        result = {
+            "name": name,
+            "live_version": target_n,
+            "rolled_back_from": live_n,
+            "status": "rolled_back",
+        }
+    await _notify_changed(name)
+    if _events is not None:
+        await announce_publish(
+            _ctx, _events, name=name, old_version=live_n,
+            new_version=target_n, evidence=evidence, actor="owner",
+            action="rollback", failed_run=failed_ref,
+        )
+    return result
+
+
+# --- Probes (0.12.0, plans/002 phase 5) ---
+
+@router.get("/playbooks/{name}/probes")
+async def list_probes(name: str):
+    """Cached preflight results per tool — feeds the phase-6 trust badges."""
+    async with _sf()() as session:
+        p = (await session.execute(
+            select(Playbook).where(Playbook.name == name)
+        )).scalar_one_or_none()
+        if not p:
+            raise HTTPException(404, f"Playbook '{name}' not found")
+        rows = (await session.execute(
+            select(PlaybookProbeResult)
+            .where(PlaybookProbeResult.playbook_id == p.id)
+            .order_by(PlaybookProbeResult.tool)
+        )).scalars().all()
+        return {
+            "name": name,
+            "probes": [
+                {
+                    "tool": r.tool,
+                    "status": r.status,
+                    "failure_class": r.failure_class,
+                    "detail": r.detail,
+                    "probed_at": r.probed_at.isoformat() if r.probed_at else None,
+                }
+                for r in rows
+            ],
+        }
+
+
+@router.post("/playbooks/{name}/preflight")
+async def run_preflight_route(name: str):
+    """Probe every tool the playbook touches now (candidate when one
+    exists, else live) — the Connections tab's check."""
+    async with _sf()() as session:
+        p = (await session.execute(
+            select(Playbook).where(Playbook.name == name)
+        )).scalar_one_or_none()
+        if not p:
+            raise HTTPException(404, f"Playbook '{name}' not found")
+        if p.candidate_version:
+            row = await _get_version_row(session, p, p.candidate_version)
+            if not row:
+                raise HTTPException(409, "Candidate version row is missing")
+            definition, version_n = row.definition or {}, row.version
+        else:
+            definition, version_n = p.definition or {}, _live_version_of(p)
+        summary = await run_preflight(
+            session, getattr(_runner, "_tools", None), p, definition,
+        )
+        await session.commit()
+        return {"name": name, "checked_version": version_n, **summary}
+
+
+# --- Manifest (0.9.0, plans/002 phase 2) ---
+
+class ManifestBody(BaseModel):
+    manifest: str
+
+
+@router.get("/playbooks/{name}/manifest")
+async def get_manifest(name: str):
+    async with _sf()() as session:
+        p = (await session.execute(
+            select(Playbook).where(Playbook.name == name)
+        )).scalar_one_or_none()
+        if not p:
+            raise HTTPException(404, f"Playbook '{name}' not found")
+        return {"name": name, "manifest": p.manifest}
+
+
+@router.put("/playbooks/{name}/manifest")
+async def put_manifest(name: str, body: ManifestBody):
+    """Owner sets the manifest directly — no approval gate on the REST path
+    (the UI IS the owner); the agent path (playbook_manifest_set) saves a
+    candidate that goes live through the gated publish (plans/033)."""
+    async with _sf()() as session:
+        p = (await session.execute(
+            select(Playbook).where(Playbook.name == name)
+        )).scalar_one_or_none()
+        if not p:
+            raise HTTPException(404, f"Playbook '{name}' not found")
+        # 0.10.0: manifest is LIVE content — record old live, then create the
+        # new live version row (never snapshot at the counter: a pending
+        # candidate may own that number).
+        await _ensure_live_row(session, p)
+        old_live = _live_version_of(p)
+        p.manifest = body.manifest
+        # plans/033: a pending candidate row carries the manifest it will
+        # put live — stamp the owner's new text on it too, so publishing
+        # that candidate later cannot revert this edit.
+        if p.candidate_version:
+            cand = await _get_version_row(session, p, p.candidate_version)
+            if cand is not None:
+                cand.manifest = body.manifest
+        await mint_version(
+            session, p,
+            definition=p.definition, code=p.code, manifest=p.manifest,
+            author="owner", message="manifest updated",
+        )
+        p.live_version = p.version
+        await session.commit()
+        version = p.version
+    await _notify_changed(name)
+    return {"name": name, "version": version, "status": "manifest_set"}
 
 
 # --- Drafts ---
@@ -623,7 +1510,6 @@ async def create_draft(body: DraftCreate | None = None):
         )
         session.add(draft)
         await session.commit()
-        _bust_sections()
         await session.refresh(draft)
         return {
             "id": str(draft.id),
@@ -657,7 +1543,6 @@ async def update_draft(draft_id: str, body: dict):
         if "name" in body:
             d.name = body["name"]
         await session.commit()
-        _bust_sections()
         return {"id": str(d.id), "name": d.name}
 
 
@@ -683,6 +1568,7 @@ async def promote_draft(draft_id: str):
             when_to_use=defn.get("when_to_use", ""),
             inputs_schema=defn.get("inputs", {}),
             definition=defn,
+            live_version=1,  # a brand-new playbook goes live directly
             agent_autonomy=defn.get("agent_autonomy", "manual_only"),
             created_by="owner",
             status="enabled",
@@ -690,7 +1576,6 @@ async def promote_draft(draft_id: str):
         session.add(p)
         await session.delete(d)
         await session.commit()
-        _bust_sections()
         await session.refresh(p)
         return {"id": str(p.id), "name": p.name, "status": "created"}
 
@@ -703,5 +1588,4 @@ async def delete_draft(draft_id: str):
             raise HTTPException(404)
         await session.delete(d)
         await session.commit()
-        _bust_sections()
         return {"id": draft_id, "status": "deleted"}

@@ -18,6 +18,7 @@ from .safety import blocked_reason
 
 DEFAULT_TIMEOUT = 30.0
 MAX_CONTENT = 50_000  # chars
+MAX_REDIRECTS = 5
 USER_AGENT = "Luna/1.0 (AI Agent; +https://github.com/huemorgan/luna)"
 _DROP_TAGS = {"script", "style", "noscript", "template", "svg", "head", "nav", "footer", "aside"}
 
@@ -79,10 +80,6 @@ async def run_fetch(url: str, *, client: httpx.AsyncClient | None = None) -> dic
     url = (url or "").strip()
     if not re.match(r"^https?://", url, re.I):
         return {"error": "invalid url", "detail": "URL must start with http:// or https://", "url": url}
-    blocked = blocked_reason(url)
-    if blocked:
-        return {"error": "blocked", "detail": blocked, "url": url}
-
     # 068/phase002: default to the per-loop shared client (warm connections);
     # an injected client (tests) is used as-is. Neither is closed here.
     if client is None:
@@ -90,9 +87,25 @@ async def run_fetch(url: str, *, client: httpx.AsyncClient | None = None) -> dic
 
         client = shared_client()
     try:
-        resp = await client.get(
-            url, timeout=DEFAULT_TIMEOUT, headers={"User-Agent": USER_AGENT}
-        )
+        current = url
+        for hop in range(MAX_REDIRECTS + 1):
+            blocked = blocked_reason(current)
+            if blocked:
+                return {"error": "blocked", "detail": blocked, "url": current}
+            resp = await client.get(
+                current, timeout=DEFAULT_TIMEOUT,
+                headers={"User-Agent": USER_AGENT}, follow_redirects=False,
+            )
+            if resp.status_code not in (301, 302, 303, 307, 308):
+                break
+            location = resp.headers.get("location")
+            if not location:
+                return {"error": "fetch failed", "detail": "redirect has no location", "url": current}
+            current = str(resp.url.join(location))
+            if not current.lower().startswith(("http://", "https://")):
+                return {"error": "blocked", "detail": "redirect uses an unsupported scheme", "url": current}
+            if hop == MAX_REDIRECTS:
+                return {"error": "fetch failed", "detail": "too many redirects", "url": current}
         resp.raise_for_status()
         ctype = resp.headers.get("content-type", "")
         if "html" in ctype or ctype == "":

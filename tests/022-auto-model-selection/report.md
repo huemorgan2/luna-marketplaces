@@ -1,5 +1,7 @@
 # 022 — AUTO model selection — execution report
 
+> Current main integration and release versions: [plan 024](../../plan/024-auto-main-integration/PLAN.md). The original branch results below are historical.
+
 Plan: [PLAN.md](../../plan/022-auto-model-selection/PLAN.md). Plugin version: 0.29.3 → 0.30.0. Core companion: Luna plan 110, version 0.93.001.
 
 The real composer now uses core's `selection` field: AUTO sends a mode-only write, concrete models select manual mode, and both survive reload. Missing backend support hides AUTO. The shared core picker renders AUTO first with explanatory copy. Failed saves roll back the optimistic state.

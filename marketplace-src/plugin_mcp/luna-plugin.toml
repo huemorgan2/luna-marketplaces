@@ -1,9 +1,11 @@
 name = "plugin-mcp"
-version = "0.2.0"
+shown_name = "MCP"
+version = "0.2.1"
 description = "Universal MCP (Model Context Protocol) tool adapter."
 entry = "plugin_mcp"
 sdk_version = "0"
-category = "connectivity"
+license = "MIT"
+category = "connectors"
 default_enabled = true
 db_tables = ["plugin_mcp_servers", "plugin_mcp_tools"]
 tags = ["mcp", "tools", "integrations", "connector"]
@@ -28,6 +30,8 @@ Built on `luna_sdk` v0 — no `import luna.*`:
 
 > Needs Node on the host to spawn stdio servers (`npx`/`node`); the luna-service
 > image ships Node 22.
+
+Source: https://github.com/huemorgan2/plugin-mcp
 """
 
 [requires]
@@ -50,8 +54,8 @@ risk_level = "low"
 [[tools]]
 name = "mcp_call_tool"
 description = "Call an MCP tool by server + tool name."
-policy = "auto_approve"
-risk_level = "medium"
+policy = "prompt_always"
+risk_level = "high"
 
 [[tools]]
 name = "mcp_refresh"
@@ -62,38 +66,38 @@ risk_level = "low"
 [[tools]]
 name = "mcp_add_server"
 description = "Add a new MCP server (disabled by default)."
-policy = "auto_approve"
+policy = "prompt_always"
 risk_level = "medium"
 
 [[tools]]
 name = "mcp_test_server_config"
 description = "Dry-run an MCP stdio server config without persisting it."
-policy = "auto_approve"
-risk_level = "low"
+policy = "prompt_always"
+risk_level = "high"
 
 [[tools]]
 name = "mcp_update_server"
 description = "Update an existing MCP server's config (command/args/env)."
-policy = "auto_approve"
-risk_level = "medium"
+policy = "prompt_always"
+risk_level = "high"
 
 [[tools]]
 name = "mcp_enable_server"
 description = "Enable a server: connect, discover tools, register them."
-policy = "auto_approve"
-risk_level = "medium"
+policy = "prompt_always"
+risk_level = "high"
 
 [[tools]]
 name = "mcp_disable_server"
 description = "Disable a server: disconnect and unregister its tools."
-policy = "auto_approve"
-risk_level = "low"
+policy = "prompt_always"
+risk_level = "medium"
 
 [[tools]]
 name = "mcp_remove_server"
 description = "Remove a server entirely (config + tools deleted)."
-policy = "auto_approve"
-risk_level = "medium"
+policy = "prompt_always"
+risk_level = "high"
 
 [[tools]]
 name = "mcp_get_server_status"

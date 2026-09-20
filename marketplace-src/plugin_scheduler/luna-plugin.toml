@@ -1,0 +1,80 @@
+name = "plugin-scheduler"
+shown_name = "Scheduler"
+version = "0.8.3"
+description = "Time-based triggers: run prompts or playbooks on a schedule, even while Luna sleeps."
+entry = "plugin_scheduler"
+sdk_version = "0"
+license = "MIT"
+category = "system"
+tags = ["scheduler", "cron", "triggers", "automation"]
+readme = """
+# plugin-scheduler
+
+Time-based triggers for Luna. A trigger runs either an **agent prompt** (as if
+the owner typed it — full agent loop, approvals, tools) or a **playbook** by
+name. The clock lives in the external always-on **scheduler-service**, so
+triggers survive restarts and fire even while this Luna is asleep; the plugin
+is the UX, the registration client, and the fire receiver
+(`POST /api/p/plugin-scheduler/fire`, HMAC-signed, idempotent on fire_id).
+
+Self-provisions on hosted Luna via the control plane's
+`/api/agent/scheduler/connect`; OSS/self-hosted Lunas can point it at their own
+scheduler-service from the settings tab. Config lives in the vault
+(`plugin_scheduler.service_url` / `.account_id` / `.secret`).
+
+Imports `luna_sdk` only. Owns its tables via `declarative_base()`.
+
+Source: https://github.com/huemorgan/plugin-scheduler
+"""
+
+[requires]
+tools = 8
+depends_on = ["plugin-vault"]
+
+[[tools]]
+name = "trigger_create"
+description = "Create a scheduled trigger (cron or natural phrase; prompt or playbook)."
+policy = "auto_approve"
+risk_level = "low"
+
+[[tools]]
+name = "trigger_list"
+description = "List scheduled triggers with next/last run."
+policy = "auto_approve"
+risk_level = "low"
+
+[[tools]]
+name = "trigger_update"
+description = "Update a trigger in place (schedule, target, name, inputs, timezone)."
+policy = "auto_approve"
+risk_level = "low"
+
+[[tools]]
+name = "trigger_delete"
+description = "Permanently delete a scheduled trigger."
+policy = "prompt_always"
+risk_level = "medium"
+
+[[tools]]
+name = "trigger_pause"
+description = "Pause a trigger (pending fires are cancelled)."
+policy = "auto_approve"
+risk_level = "low"
+
+[[tools]]
+name = "trigger_resume"
+description = "Resume a paused trigger (no catch-up)."
+policy = "auto_approve"
+risk_level = "low"
+
+[[tools]]
+name = "trigger_run_now"
+description = "Fire a trigger immediately; the run still respects approvals."
+policy = "auto_approve"
+risk_level = "low"
+
+[[tools]]
+name = "remind_me"
+description = "One-shot reminder: in N minutes the note fires back as a prompt."
+policy = "auto_approve"
+risk_level = "low"

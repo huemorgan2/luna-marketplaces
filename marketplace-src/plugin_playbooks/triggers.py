@@ -6,6 +6,7 @@ When an event matches a trigger's filter, starts a playbook run with mapped inpu
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -18,6 +19,8 @@ from luna_sdk import EventBus
 
 from .definition import TriggerDef
 from .models import Playbook
+from .runner import InputTypeError
+from .versioning import live_version_of
 
 log = logging.getLogger("luna.playbooks.triggers")
 
@@ -38,6 +41,11 @@ class PlaybookTriggerService:
         self._runner = runner
         # event name -> unsubscribe callable (EventBus.subscribe return value)
         self._unsubs: dict[str, Any] = {}
+        # 0.26.0 (plans/015, 089 §6): single-flight — key of every trigger
+        # delivery whose run is still alive. A concurrent IDENTICAL delivery
+        # (same playbook, event, mapped inputs) is dropped instead of
+        # starting a duplicate run; the key clears when the run's task ends.
+        self._in_flight: set[str] = set()
 
     async def start(self) -> None:
         """Scan all enabled playbooks and subscribe to their trigger events."""
@@ -48,6 +56,10 @@ class PlaybookTriggerService:
 
         event_map: dict[str, list[tuple[Playbook, TriggerDef]]] = {}
         for pb in playbooks:
+            if live_version_of(pb) is None:
+                # plans/032 phase 04: a candidate-only playbook has no
+                # live version — its triggers activate at publish.
+                continue
             definition = pb.definition or {}
             for trigger_data in definition.get("triggers", []):
                 try:
@@ -67,21 +79,79 @@ class PlaybookTriggerService:
                         if trigger.if_expr and not _eval_if(trigger.if_expr, payload):
                             continue
                         mapped = _apply_map(trigger.map, payload)
+                        flight_key = self._flight_key(pb, trigger.event, mapped)
+                        if flight_key in self._in_flight:
+                            # 089 §6 single-flight: identical concurrent
+                            # delivery — one run is already going.
+                            log.info(
+                                "trigger.deduped playbook=%s bus_event=%s",
+                                pb.name, trigger.event,
+                            )
+                            continue
                         log.info(
                             "trigger.fired playbook=%s bus_event=%s",
                             pb.name, trigger.event,
                         )
                         try:
-                            await self._runner.start_run(
+                            # plans/009: background start — a slow playbook
+                            # must not block the event bus handler for its
+                            # whole duration. Execution errors are handled and
+                            # logged inside the runner's drive loop.
+                            self._in_flight.add(flight_key)
+                            run = await self._runner.start_run_background(
                                 pb, inputs=mapped, trigger=trigger.event,
                             )
+                            task = getattr(self._runner, "_tasks", {}).get(run.id)
+                            if task is not None:
+                                task.add_done_callback(
+                                    lambda _t, k=flight_key:
+                                        self._in_flight.discard(k)
+                                )
+                            else:
+                                # run already finished (or untracked) —
+                                # nothing left to guard.
+                                self._in_flight.discard(flight_key)
+                        except InputTypeError as e:
+                            # plans/032 phase 04: loud intake on the trigger
+                            # path — a failed run row names the input so the
+                            # failure digest / runs list show it; no run ever
+                            # started.
+                            self._in_flight.discard(flight_key)
+                            log.warning(
+                                "trigger.input_rejected playbook=%s input=%s expected=%s",
+                                pb.name, e.input, e.expected,
+                            )
+                            try:
+                                run = await self._runner._create_run(
+                                    pb, inputs=mapped, trigger=trigger.event,
+                                )
+                                await self._runner._complete_run(
+                                    run.id, "failed", error=str(e),
+                                    error_type="InputTypeError",
+                                )
+                            except Exception:  # noqa: BLE001
+                                log.exception("trigger.input_rejected_record_failed playbook=%s", pb.name)
                         except Exception:
+                            self._in_flight.discard(flight_key)
                             log.exception("trigger.run_failed playbook=%s", pb.name)
 
             # NB: EventBus.subscribe (there is no .on — the old call made
             # start() crash silently and no trigger ever fired).
-            self._unsubs[event_name] = self._events.subscribe(event_name, _handler)
+            # 0.26.0 (plans/015, 089 §6): background=True — the handler must
+            # run off the emitting task so a bus event fired inside a chat
+            # turn cannot start a playbook run within that turn's context.
+            self._unsubs[event_name] = self._events.subscribe(
+                event_name, _handler, background=True,
+            )
             log.info("trigger.subscribed bus_event=%s count=%s", event_name, len(entries))
+
+    @staticmethod
+    def _flight_key(pb: Playbook, event: str, inputs: dict[str, Any]) -> str:
+        try:
+            canon = json.dumps(inputs, sort_keys=True, default=str)
+        except Exception:  # noqa: BLE001
+            canon = repr(inputs)
+        return f"{pb.id}|{event}|{canon}"
 
     async def stop(self) -> None:
         """Clean up subscriptions."""

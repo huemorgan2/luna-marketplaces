@@ -11,10 +11,13 @@ each step boundary. DBOS integration can be added later for crash recovery.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
+import json
 import logging
-import time
+import re
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
@@ -27,10 +30,93 @@ from luna_sdk import EventBus, PluginContext, ToolRegistry, message_source
 
 from .definition import OnError, PlaybookDef, StepDef, StepKind
 from .models import Playbook, PlaybookRun, PlaybookStepRun
+from .publish import ops_conversation_id as _ops_conversation_id
+from .v2 import MAX_DURATION_S, DbJournalStore, JournalStore, SegmentLoop
+from .v2.checker import sniff_format
+from .v2.loop import V2RunError, code_sha256
+from .v2.park import ParkService, label_test_run
+from .versioning import get_version_row, shim_playbook
 
 log = logging.getLogger("luna.playbooks.runner")
 
-_SANDBOX_ENV = SandboxedEnvironment(undefined=StrictUndefined)
+
+class _PlaybookEnvironment(SandboxedEnvironment):
+    """plans/003: Mappings are DATA — `.attr` on a dict always reads the key.
+
+    Jinja's default getattr prefers Python attributes, so a documented path
+    like `steps.fetch.result.items` returned the dict's bound `.items()`
+    method and failed steps later with an opaque error. `_VarsView` fixed
+    this for top-level `inputs`/`vars` only; this fixes every depth. A
+    missing key is undefined (loud under StrictUndefined) — dict methods are
+    never reachable via attribute access (use Jinja filters instead).
+    """
+
+    def getattr(self, obj: Any, attribute: str) -> Any:
+        if isinstance(obj, Mapping):
+            try:
+                return obj[attribute]
+            except KeyError:
+                return self.undefined(obj=obj, name=attribute)
+        return super().getattr(obj, attribute)
+
+
+def _regex_replace(value: Any, pattern: str, replacement: str = "", count: int = 0) -> str:
+    return re.sub(pattern, replacement, str(value), count=count)
+
+
+def _regex_search(value: Any, pattern: str, group: int | str = 0) -> str:
+    m = re.search(pattern, str(value))
+    return m.group(group) if m else ""
+
+
+def _regex_findall(value: Any, pattern: str) -> list[Any]:
+    return re.findall(pattern, str(value))
+
+
+def _split(value: Any, sep: str | None = None, maxsplit: int = -1) -> list[str]:
+    return str(value).split(sep, maxsplit)
+
+
+class _DryStub(dict):
+    """plans/026: the placeholder result of an UNSTUBBED tool/code step in a
+    dry run — an empty Mapping that resolves ANY key chain to a chained stub
+    rendering as ``<dry:path>``, instead of raising StrictUndefined.
+
+    Empty means ``{% if %}`` sees falsy and ``loop over=`` iterates zero
+    times. ``_dry``/``_note`` answer via access (self-description, plans/022)
+    without being real keys, so iteration and JSON serialization (``{}``)
+    stay clean; the step WRAPPER carries the real ``_dry``/``_note`` markers.
+    Scripted stubs still script results verbatim — this only covers the
+    unstubbed path, so a playbook smoke-tests before any stubs are written.
+    """
+
+    def __init__(self, path: str = "dry", note: str = "simulated") -> None:
+        super().__init__()
+        self._path = path
+        self._stub_note = note
+
+    def __missing__(self, key: Any) -> Any:
+        if key == "_dry":
+            return True
+        if key == "_note":
+            return self._stub_note
+        return _DryStub(f"{self._path}.{key}", self._stub_note)
+
+    def __str__(self) -> str:
+        return f"<dry:{self._path}>"
+
+    __repr__ = __str__
+
+
+_SANDBOX_ENV = _PlaybookEnvironment(undefined=StrictUndefined)
+# plans/003 phase 2: the one real gap in the builtin filter set. Everything
+# else agents reached for (selectattr, map, tojson, …) already exists.
+_SANDBOX_ENV.filters.update({
+    "regex_replace": _regex_replace,
+    "regex_search": _regex_search,
+    "regex_findall": _regex_findall,
+    "split": _split,
+})
 
 # 008.006: how often a live run emits `activity.heartbeat`. Clients derive
 # `running = (now - lastBeat) < TTL` with TTL ≈ 8s, so a missed completion
@@ -45,6 +131,212 @@ _active_run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
+def active_run_id() -> str | None:
+    """Run id when the current context is INSIDE a playbook run, else None.
+
+    Contextvars propagate through agent_step's run_turn into its tool calls,
+    so the run-starting tools use this to refuse nested runs (006.707).
+    """
+    return _active_run_id.get()
+
+
+def _normalize_tool_result(result: Any) -> Any:
+    """Parse JSON-string tool results into structured data.
+
+    Most Luna tool handlers return json.dumps(...) strings. Stored raw, they
+    leak quoted JSON into step outputs, dry-run stubs, and the run view
+    (plans/002 phase 7). Only strings that parse to a dict or list are
+    converted — plain text passes through untouched.
+    """
+    if isinstance(result, str) and result.lstrip()[:1] in ("{", "["):
+        try:
+            parsed = json.loads(result)
+        except ValueError:
+            return result
+        if isinstance(parsed, (dict, list)):
+            return parsed
+    return result
+
+
+# plans/031: same shape as luna.agent.vault_refs.VAULT_REF_RE (keep in sync) —
+# a value is a ref only when the ENTIRE string matches, so prose that merely
+# mentions `vault:x` never triggers resolution.
+_VAULT_REF_RE = re.compile(r"^vault:([A-Za-z0-9][A-Za-z0-9_.\-]{0,127})$")
+
+
+def _iter_strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, Mapping):
+        for v in value.values():
+            yield from _iter_strings(v)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _iter_strings(v)
+
+
+async def resolve_vault_refs(
+    vault: Any, args: Any, *, step_id: str, cache: dict[str, str] | None = None,
+) -> Any:
+    """plans/031 vault-ref resolution on a COPY of `args` (see
+    `PlaybookRunner._resolve_vault_refs`); shared with the v2 segment loop
+    (plans/032 phase 02) so both runtimes resolve refs identically.
+    `cache` (phase 08): a caller-owned name → value dict that outlives the
+    call — the v2 loop keeps one per run to scrub `run()`'s return value."""
+    if not any(_VAULT_REF_RE.match(s) for s in _iter_strings(args)):
+        return args
+    if vault is None:
+        raise ValueError(
+            f"Step '{step_id}': arguments use a vault:<name> reference "
+            "but no vault is available to the playbook runtime."
+        )
+    if cache is None:
+        cache = {}
+
+    async def resolve(value: Any) -> Any:
+        if isinstance(value, str):
+            m = _VAULT_REF_RE.match(value)
+            if not m:
+                return value
+            name = m.group(1)
+            if name not in cache:
+                try:
+                    cred = await vault.get_credential(name)
+                except KeyError:
+                    raise ValueError(
+                        f"Step '{step_id}': vault credential '{name}' not "
+                        "found. Check the name with list_credentials, or "
+                        "store it first."
+                    ) from None
+                except PermissionError as e:
+                    raise ValueError(
+                        f"Step '{step_id}': vault ref denied: {e} Grant "
+                        "plugin-playbooks read access to the credential."
+                    ) from None
+                cache[name] = cred.value
+            return cache[name]
+        if isinstance(value, Mapping):
+            return {k: await resolve(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            resolved = [await resolve(v) for v in value]
+            return tuple(resolved) if isinstance(value, tuple) else resolved
+        return value
+
+    return await resolve(args)
+
+
+def _playbook_origin_scope(playbook: Any):
+    """Bind the billing origin for a playbook run and everything it derives
+    (luna-service 048): root_action_type=playbook_run + a stable playbook id.
+    A scheduler-initiated run already carries channel=scheduler + the trigger
+    id on the outer scope; that job id wins (the trigger is the cost driver),
+    while this run keeps a plain (non-scheduler) channel so user-initiated
+    playbooks land in the Playbooks usage section. No-op on older luna core."""
+    from contextlib import nullcontext
+    try:
+        from luna_sdk import billing_origin_scope
+    except Exception:  # noqa: BLE001 — older core: degrade to no attribution
+        return nullcontext()
+    return billing_origin_scope(
+        root_action_type="playbook_run",
+        job_id=getattr(playbook, "name", None),
+        prefer_outer_job_id=True,  # a scheduler trigger id (if any) wins
+    )
+
+
+class InputTypeError(ValueError):
+    """plans/032 phase 04 (docs/v2.md §2 Language): a run input that cannot
+    be coerced to its declared schema type fails AT INTAKE, naming the
+    input and the type — never a silent pass-through into the run."""
+
+    def __init__(self, input: str, expected: str, got: Any) -> None:
+        self.input = input
+        self.expected = expected
+        self.got = got
+        super().__init__(f"input {input!r} expects {expected}, got {got!r}")
+
+
+class ToolStepTimeout(RuntimeError):
+    """A tool may have committed an effect before its response timed out."""
+
+
+class LegacyWaitUnsupported(RuntimeError):
+    """Legacy pblang has no durable owner/event wait implementation."""
+
+
+def _coerce_inputs(playbook: Any, inputs: dict[str, Any]) -> dict[str, Any]:
+    """plans/022 P5b: coerce run inputs through the playbook's declared
+    input schema BEFORE the run starts — stored inputs and runtime inputs
+    are the same coerced objects.
+
+    During the meltdown a trigger mapping ({{ event.payload.itemId }})
+    delivered Monday's numeric itemId as an int while the schema declared
+    string; conditions then compared str != int and misbranched — while the
+    stored run inputs showed the string, making the run unreproducible from
+    its own record. Per property: scalar type mismatches are coerced
+    (int/float/bool → str; numeric str → int/float; bool-ish str → bool).
+    plans/032 phase 04: a string that cannot become the declared integer /
+    number / boolean raises `InputTypeError` — the intake, not the run,
+    owns that failure (loud, named, typed). Values of other shapes (lists,
+    dicts, None) pass through as before."""
+    schema = getattr(playbook, "inputs_schema", None) or {}
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    if not props or not inputs:
+        return inputs
+    out = dict(inputs)
+    for key, prop in props.items():
+        if key not in out or not isinstance(prop, dict):
+            continue
+        val = out[key]
+        declared = prop.get("type")
+        try:
+            if declared == "string" and isinstance(val, (int, float, bool)):
+                out[key] = str(val)
+            elif declared == "integer" and isinstance(val, str):
+                if not val.strip().lstrip("+-").isdigit():
+                    raise InputTypeError(key, "integer", val)
+                out[key] = int(val.strip())
+            elif declared == "number" and isinstance(val, str):
+                out[key] = float(val.strip())
+            elif declared == "boolean" and isinstance(val, str):
+                low = val.strip().lower()
+                if low in ("true", "1", "yes"):
+                    out[key] = True
+                elif low in ("false", "0", "no"):
+                    out[key] = False
+                else:
+                    raise InputTypeError(key, "boolean", val)
+        except InputTypeError:
+            raise
+        except (ValueError, TypeError):
+            raise InputTypeError(key, str(declared), val) from None
+    return out
+
+
+def _is_python_playbook(playbook: Any) -> bool:
+    """plans/032 phase 04: the `format` column decides; a row/shim without
+    the column set (legacy default 'pblang' on a python source, phase 02 test
+    rows) is sniffed from its code."""
+    fmt = getattr(playbook, "format", None)
+    if fmt == "python":
+        return True
+    if fmt == "pblang" and (playbook.definition or {}).get("steps"):
+        return False
+    return sniff_format(getattr(playbook, "code", None) or "") == "python"
+
+
+def _legacy_wait_step(steps: list[StepDef]) -> StepDef | None:
+    """Find an unsafe legacy wait anywhere before executing any effect."""
+    for step in steps:
+        if step.kind in (StepKind.WAIT_FOR_APPROVAL, StepKind.WAIT_FOR_EVENT):
+            return step
+        for children in (step.then, step.else_, step.body):
+            if children and (found := _legacy_wait_step(children)):
+                return found
+        for branch in step.branches or []:
+            if found := _legacy_wait_step(branch):
+                return found
+    return None
 
 
 class PlaybookRunner:
@@ -58,6 +350,8 @@ class PlaybookRunner:
         events: EventBus,
         agent: Any = None,
         context: PluginContext | None = None,
+        journal: JournalStore | None = None,
+        max_duration: float = MAX_DURATION_S,
     ) -> None:
         self._sf = session_factory
         self._tools = tool_registry
@@ -66,6 +360,28 @@ class PlaybookRunner:
         # 009.001/phase03 (E6): conversation pinning reads/writes go through
         # the SDK context instead of luna.agent.runtime internals.
         self._ctx = context
+        # plans/009: background run tasks by run id. Holding a strong ref
+        # keeps the task alive (create_task alone can be GC'd); entries pop
+        # via done-callback. wait_for_run/cancel_run look tasks up here.
+        self._tasks: dict[Any, asyncio.Task] = {}
+        # plans/032 phase 02: the v2 segment loop (docs/v2.md §11). Phase 06:
+        # the journal is durable (`playbook_journal`, write-ahead rows) so a
+        # run survives a restart; `journal=` overrides it (tests). Dry runs
+        # keep their own MemoryJournalStore inside SegmentLoop.dry_run.
+        # phase 03: the same facade v1's llm/agent steps use, and the bound
+        # blocking `start_run` for `ctx.subtask` (parent/child run rows).
+        journal = journal if journal is not None else DbJournalStore(session_factory)
+        # phase 07: parked runs (docs/v2.md §6 / §11 "Parked") — the service
+        # that owns a run while no task drives it; `resume` spawns the
+        # continuation, `_complete_run` fails it loudly (max_duration).
+        self.park = ParkService(
+            session_factory, events, context, journal, self.resume,
+            max_duration=max_duration, complete_run=self._complete_run,
+        )
+        self._v2 = SegmentLoop(
+            session_factory, tool_registry, events, context, journal,
+            agent=agent, start_run=self.start_run, park=self.park,
+        )
 
     async def start_run(
         self,
@@ -73,23 +389,474 @@ class PlaybookRunner:
         inputs: dict[str, Any] | None = None,
         trigger: str | None = None,
         parent_run_id: Any = None,
+        is_test: bool = False,
     ) -> PlaybookRun:
-        """Create a new run and begin executing it."""
+        """Create a run and execute it to completion (blocking).
+
+        Subtask composition depends on these semantics — a parent playbook
+        must wait for its child. Chat/HTTP/trigger entry points use
+        `start_run_background` instead (plans/009).
+        """
+        inputs = _coerce_inputs(playbook, inputs or {})
+        run = await self._create_run(
+            playbook, inputs=inputs, trigger=trigger,
+            parent_run_id=parent_run_id, is_test=is_test,
+        )
+        await self._drive_run(run, playbook, inputs)
+        return run
+
+    async def start_run_background(
+        self,
+        playbook: Playbook,
+        inputs: dict[str, Any] | None = None,
+        trigger: str | None = None,
+        parent_run_id: Any = None,
+        is_test: bool = False,
+        needs_owner_card: bool = False,
+    ) -> PlaybookRun:
+        """Create a run and execute it in a background task.
+
+        Returns immediately with the run in status 'running'. Callers get a
+        real run_id up front — a slow playbook can never orphan a run behind
+        a tool/HTTP timeout again. Pair with `wait_for_run` for a bounded
+        wait, `playbook_status` for polling, `cancel_run` to stop it.
+
+        plans/032 phase 08 `needs_owner_card` (`playbook_run` on an
+        `agent_must_confirm` playbook): a per-run owner card is raised BEFORE
+        anything runs. Pending → the row is `parked` on it (`parked_on`
+        carries the card id) and the returned run says so: a python run has
+        no task until the owner decides (`ParkService` spawns its first
+        segment — restart-safe); a pblang run's task waits in-process for
+        the decision (lost on a restart — v1 parity). Rejected/expired →
+        `failed` (`Rejected` / `ApprovalExpired`). Approved inline (a grant)
+        → runs at once.
+        """
+        inputs = _coerce_inputs(playbook, inputs or {})
+        run = await self._create_run(
+            playbook, inputs=inputs, trigger=trigger,
+            parent_run_id=parent_run_id, is_test=is_test,
+        )
+        await_card = False
+        if needs_owner_card:
+            outcome = await self._raise_run_card(run, playbook, inputs)
+            if outcome == "failed":
+                return run
+            if outcome == "parked":
+                if run.format == "python":
+                    return run  # no task: the decision spawns the first segment
+                await_card = True
+        task = asyncio.create_task(
+            self._drive_run(run, playbook, inputs, await_card=await_card),
+            name=f"playbook-run-{run.id}",
+        )
+        self._track(run.id, task)
+        return run
+
+    async def _raise_run_card(self, run: PlaybookRun, playbook: Playbook, inputs: dict[str, Any]) -> str:
+        """The per-run owner card (phase 08). → "approved" | "parked" |
+        "failed" (the row is completed here on "failed"; `run.status` /
+        `run.parked_on` mirror the row on every return)."""
+        request_kw = await self._run_card_kw(run, playbook, inputs)
+        try:
+            decision, parked_on = await self.park.park_run(
+                run, request_kw, in_task=run.format != "python",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — fail CLOSED: no card, no run
+            log.exception("playbook.run.card_failed run_id=%s", run.id)
+            error = f"owner card could not be raised: {type(e).__name__}: {e}"
+            await self._complete_run(
+                run.id, "failed", error=error, error_type="ApprovalUnavailable",
+                failed_at=datetime.now(timezone.utc),
+            )
+            run.status = "failed"
+            return "failed"
+        if parked_on is not None:
+            run.status = "parked"
+            run.parked_on = parked_on
+            await self._events.emit("playbook.run.parked", {
+                "run_id": str(run.id),
+                "playbook_id": str(run.playbook_id or ""),
+                "playbook_name": playbook.name,
+                "playbook_version": run.playbook_version,
+                "is_test": bool(run.is_test),
+                "trigger": run.trigger,
+                "conversation_id": str(run.conversation_id) if run.conversation_id else None,
+                "parent_run_id": str(run.parent_run_id) if run.parent_run_id else None,
+                "wake_on_complete": bool(getattr(run, "wake_on_complete", False)),
+                "seq": 0, "step_id": None, "parked_on": dict(parked_on),
+            })
+            return "parked"
+        if getattr(decision, "decision", None) == "approved":
+            return "approved"
+        rid = getattr(decision, "request_id", None)
+        reason = getattr(decision, "reason", None)
+        error_type = "ApprovalExpired" if reason == "ttl elapsed" else "Rejected"
+        error = (
+            f"owner card #{rid} expired before a decision (ttl elapsed)"
+            if error_type == "ApprovalExpired"
+            else f"run rejected by owner card #{rid}" + (f": {reason}" if reason else "")
+        )
+        await self._complete_run(
+            run.id, "failed", error=error, error_type=error_type,
+            failed_at=datetime.now(timezone.utc),
+        )
+        run.status = "failed"
+        return "failed"
+
+    async def _run_card_kw(self, run: PlaybookRun, playbook: Playbook, inputs: dict[str, Any]) -> dict[str, Any]:
+        """The `kind="playbook_run"` card: payload `{playbook, version, inputs}`
+        is identity (luna pins the shape); presentation is advisory."""
+        name = playbook.name
+        version = run.playbook_version
+        wake_conv = run.conversation_id or await _ops_conversation_id(self._ctx)
+        request_kw = {
+            "kind": "playbook_run",
+            "summary": f"Run playbook '{name}' v{version} (agent request)",
+            "payload": {"playbook": name, "version": version, "inputs": dict(inputs or {})},
+            "requested_by_plugin": "plugin-playbooks",
+            "risk_level": "medium",
+            "conversation_id": wake_conv,
+            "presentation": {
+                "eyebrow": "Playbook run",
+                "headline": (playbook.display_name or name)[:90],
+                "explanation": (
+                    "The agent asked to run this playbook now.\n\n"
+                    f"Inputs: {json.dumps(inputs or {}, indent=2, default=str)}"
+                ),
+                "changes": [],
+            },
+        }
+        label_test_run(request_kw, run)
+        return request_kw
+
+    def _track(self, run_id: Any, task: asyncio.Task) -> None:
+        """Register a run's driving task. The done-callback pops only ITS
+        task: a parked run's continuation (phase 07 `resume`) registers a
+        new task under the same id before the old one is collected."""
+        self._tasks[run_id] = task
+        task.add_done_callback(
+            lambda _t, _id=run_id: self._tasks.pop(_id, None) if self._tasks.get(_id) is _t else None
+        )
+
+    def resume(self, run: PlaybookRun) -> asyncio.Task:
+        """Phase 07: spawn the continuation of a run `ParkService._resume`
+        just flipped back to `running`. Waits for a still-live previous task
+        of the same run (the segment that parked it is unwinding) so two
+        tasks never drive one journal."""
+        prior = self._tasks.get(run.id)
+
+        async def _go() -> None:
+            if prior is not None and prior is not asyncio.current_task() and not prior.done():
+                with contextlib.suppress(BaseException):
+                    await prior
+            await self._resume_run(run, from_park=True)
+
+        task = asyncio.create_task(_go(), name=f"playbook-run-{run.id}")
+        self._track(run.id, task)
+        return task
+
+    async def wait_for_run(self, run_id: Any, timeout: float) -> PlaybookRun | None:
+        """Wait up to `timeout` seconds for a background run, then return the
+        run's current DB state (whatever its status is by then). Never cancels
+        the run — a timeout here just means 'still going'."""
+        task = self._tasks.get(run_id)
+        if task is not None and timeout > 0:
+            await asyncio.wait([task], timeout=timeout)
+        async with self._sf() as session:
+            return await session.get(PlaybookRun, run_id)
+
+    async def sweep_orphaned_runs(self) -> int:
+        """0.5.1: mark "running" rows with no live task as failed.
+
+        A run row can claim "running" with nothing driving it: the process
+        restarted or the plugin was upgraded (background tasks die with the
+        process), or — pre-0.5.0 — the blocking tool call was cancelled at
+        the harness timeout and the CancelledError skipped every completion
+        handler. Called at plugin load, where `self._tasks` only contains
+        tasks started by THIS runner, so anything else is an orphan. Quiet by
+        design: no bus events for deaths that predate this process — EXCEPT
+        runs stamped wake_on_complete (plans/028): the agent was promised a
+        wake, so those emit playbook.run.completed and get their failure
+        moment instead of vanishing.
+        """
+        note = (
+            "interrupted — the server restarted or the plugin was upgraded "
+            "while this run was in flight"
+        )
+        now = datetime.now(timezone.utc)
+        swept = 0
+        owed_wakes: list[tuple[Any, str, str, str]] = []
+        async with self._sf() as session:
+            runs = (await session.execute(
+                select(PlaybookRun).where(PlaybookRun.status == "running")
+            )).scalars().all()
+            # plans/032 phase 06: a v2 run (journal row 0 present) is never
+            # swept — `resume_interrupted_runs` continues it on
+            # `on_server_ready`. Computed before any row is touched.
+            journaled = await self._v2.journal.journaled(
+                [run.id for run in runs if run.id not in self._tasks]
+            )
+            for run in runs:
+                if run.id in self._tasks or run.id in journaled:
+                    continue
+                steps = (await session.execute(
+                    select(PlaybookStepRun).where(
+                        PlaybookStepRun.run_id == run.id,
+                        PlaybookStepRun.status == "running",
+                    )
+                )).scalars().all()
+                # An in-flight legacy step may already have caused an external
+                # effect. Its outcome cannot be reconstructed without the v2
+                # journal; never label it a definite failure or replay it.
+                unknown = bool(steps)
+                status = "timed_out_unknown" if unknown else "failed"
+                error_type = "OutcomeUnknown" if unknown else "Interrupted"
+                error = (
+                    "Outcome unknown — server restarted while legacy step(s) "
+                    + ", ".join(sorted({step.step_id for step in steps}))
+                    + " were in flight; inspect external state before retrying"
+                    if unknown else note
+                )
+                run.status = status
+                run.completed_at = now
+                run.error = error
+                run.error_type = error_type
+                run.failed_at = now
+                if getattr(run, "wake_on_complete", False):
+                    owed_wakes.append((run.id, status, error, error_type))
+                for step in steps:
+                    step.status = status
+                    step.error = step.error or error
+                    step.completed_at = step.completed_at or now
+                swept += 1
+            if swept:
+                await session.commit()
+        # plans/028: deliver the owed completion event (which the wake
+        # service turns into a failure moment) via the normal path — it
+        # re-stamps the same terminal status, so this is idempotent.
+        for run_id, status, error, error_type in owed_wakes:
+            try:
+                await self._complete_run(
+                    run_id, status, error=error, error_type=error_type,
+                    failed_at=now,
+                )
+            except Exception:  # noqa: BLE001 — sweep must never block load
+                log.exception("playbook.runs.sweep_wake_failed run=%s", run_id)
+        if swept:
+            log.info("playbook.runs.swept_orphans count=%d", swept)
+        return swept
+
+    async def resume_interrupted_runs(self) -> int:
+        """plans/032 phase 06 (docs/v2.md §6): continue every `running` v2 run
+        this process is not driving — what a restart left behind. Called from
+        `on_server_ready` (the serving loop; core awaits the hook, so the runs
+        are SPAWNED here, never awaited). Each run gets a task named like a
+        background run and registered in `self._tasks`, so `cancel_run`,
+        `wait_for_run` and the sweep's live check keep working. v1 rows have
+        no journal and are left to the sweep. Returns the count spawned."""
+        async with self._sf() as session:
+            runs = (await session.execute(
+                select(PlaybookRun).where(PlaybookRun.status == "running")
+            )).scalars().all()
+        candidates = [run for run in runs if run.id not in self._tasks]
+        journaled = await self._v2.journal.journaled([run.id for run in candidates])
+        # 041: the initiating candidate-test tool call died with the old
+        # process. Its normal inline result can never reach the agent, so a
+        # resumed test must leave a durable completion wake in that chat.
+        # Ordinary candidate tests still report inline and stay unflagged.
+        interrupted_tests = [
+            run for run in candidates
+            if run.id in journaled and run.is_test
+            and run.trigger == "agent-candidate" and run.conversation_id
+        ]
+        if interrupted_tests:
+            async with self._sf() as session:
+                for run in interrupted_tests:
+                    row = await session.get(PlaybookRun, run.id)
+                    if row is not None and row.status == "running":
+                        row.wake_on_complete = True
+                await session.commit()
+        resumed = 0
+        for run in candidates:
+            if run.id not in journaled:
+                continue
+            task = asyncio.create_task(
+                self._resume_run(run), name=f"playbook-run-{run.id}",
+            )
+            self._track(run.id, task)
+            resumed += 1
+        if resumed:
+            log.info("playbook.runs.resumed count=%d", resumed)
+        return resumed
+
+    async def _resume_run(self, run: PlaybookRun, *, from_park: bool = False) -> None:
+        """Drive a resumed v2 run to its terminal status on the EXACT version
+        row it started on (`playbook_runs.playbook_version`), with the
+        `_drive_run` scaffolding around `SegmentLoop.resume`. Inputs come from
+        journal entry 0 (what the shim replays). No `PlaybookDef`, no
+        `_RunContext`: a v2 definition is the checker summary.
+
+        `from_park` (phase 07): the continuation after a park — the run may
+        park again, in which case the row is left `parked` (no completion)."""
+        async with self._sf() as session:
+            playbook = await session.get(Playbook, run.playbook_id)
+            row = (
+                await get_version_row(session, playbook, int(run.playbook_version))
+                if playbook is not None else None
+            )
+        if playbook is None or row is None:
+            await self._complete_run(
+                run.id, "failed",
+                error=(
+                    f"cannot resume: version {run.playbook_version} of playbook "
+                    f"{getattr(playbook, 'name', run.playbook_id)!s} has no version row"
+                ),
+                error_type="VersionMissing",
+            )
+            return
+        e0 = await self._v2.journal.entry0(str(run.id))
+        # plans/032 phase 08: a run approved off its per-run owner card has
+        # no journal yet (the park preceded effect 1) — drive it fresh from
+        # the row's inputs; every other resume continues its journal.
+        fresh = e0 is None
+        e0 = e0 or {}
+        pinned = e0.get("code_sha256")
+        if pinned and code_sha256(row.code or "") != pinned:
+            # code edited under a run: refuse BEFORE any jail spawn (Risks 8)
+            await self._complete_run(
+                run.id, "failed",
+                error=(
+                    f"journal divergence: the source of playbook '{playbook.name}' "
+                    f"v{row.version} no longer matches the code this run started on — "
+                    "candidate causes: set iteration, code edited under a run, "
+                    "non-journaled randomness"
+                ),
+                error_type="JournalDivergence",
+            )
+            return
+        shim = shim_playbook(playbook, row)
+
+        activity_id = str(run.id)
+        activity_label = shim.display_name or shim.name
+        activity_meta = {"playbook_name": shim.name}
+        await self._events.emit("activity.started", {
+            "activity_id": activity_id,
+            "kind": "playbook",
+            "label": activity_label,
+            "meta": activity_meta,
+        })
+        token = _active_run_id.set(str(run.id))
+        source_token = message_source.set("playbook")
+        heartbeat_task = asyncio.create_task(
+            self._activity_heartbeat(activity_id, activity_label, activity_meta)
+        )
+        try:
+            with _playbook_origin_scope(shim):
+                res = (
+                    await self._v2.drive(run, shim, dict(run.inputs or {}))
+                    if fresh else
+                    await self._v2.resume(run, shim, from_park=from_park)
+                )
+            if res.parked:
+                # phase 07: the row is `parked`; ParkService owns it now
+                run.status = "parked"
+                return
+            await self._complete_run(run.id, "done", result=res.value)
+            run.status = "done"
+        except V2RunError as e:
+            # docs/v2.md §6/§7: an uncaught OutcomeUnknown ends the run
+            # `timed_out_unknown`; every other kind is `failed`
+            status = "timed_out_unknown" if e.error_type == "OutcomeUnknown" else "failed"
+            log.info("playbook.run.v2_failed run_id=%s type=%s status=%s", run.id, e.error_type, status)
+            await self._complete_run(
+                run.id, status, error=e.error, error_type=e.error_type,
+                traceback=e.traceback, failed_at=e.failed_at,
+            )
+            run.status = status
+        except asyncio.CancelledError:
+            log.info("playbook.run.cancelled run_id=%s", run.id)
+            await self._complete_run(run.id, "cancelled")
+            run.status = "cancelled"
+        except Exception as e:
+            log.exception("playbook.run.error run_id=%s", run.id)
+            await self._complete_run(run.id, "failed", error=str(e))
+            run.status = "failed"
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001
+                pass
+            await self._events.emit("activity.completed", {
+                "activity_id": activity_id,
+                "kind": "playbook",
+                "label": activity_label,
+                "status": run.status,
+                "meta": activity_meta,
+            })
+            message_source.reset(source_token)
+            _active_run_id.reset(token)
+
+    async def _create_run(
+        self,
+        playbook: Playbook,
+        inputs: dict[str, Any] | None = None,
+        trigger: str | None = None,
+        parent_run_id: Any = None,
+        is_test: bool = False,
+    ) -> PlaybookRun:
+        """Persist the run row and announce it — shared by both entry points."""
         # 006.712: capture the originating conversation so agent_steps can
         # send_chat_message back to the right chat. playbook_run is called
         # inside a chat turn, where the contextvar is pinned; trigger/cron
         # runs have no origin and stay null.
         conversation_id = self._ctx.current_conversation_id if self._ctx else None
 
+        # 0.26.0 (plans/015, 089 §1): stamp WHERE this run reports at
+        # creation — delivery-time resolution is abolished. Test runs report
+        # to the chat that started them (fallback ops); a live run the agent
+        # starts inside a chat ("agent"/subtask triggers) reports where it
+        # was asked for.
+        # plans/016 phase 2: the ops chat carries exceptions only. A
+        # background live run (trigger/cron) stamps NO report chat — its
+        # send_chat_message steps must name their own conversation (the
+        # runner refuses otherwise, see _run_tool_call).
+        chat_invoked = trigger is not None and (
+            trigger == "agent" or trigger.startswith("subtask:")
+        )
+        if is_test:
+            report_to = conversation_id or await _ops_conversation_id(self._ctx)
+        elif chat_invoked and conversation_id is not None:
+            report_to = conversation_id
+        else:
+            report_to = None
+
         async with self._sf() as session:
             run = PlaybookRun(
                 playbook_id=playbook.id,
-                playbook_version=playbook.version,
+                # 0.10.0: `version` is a monotonic counter; the content being
+                # executed is `live_version` (0 = pre-backfill "same as
+                # version"). Candidate test runs pass a transient shim whose
+                # live_version is the candidate number, so this stamp always
+                # names the content that actually ran.
+                playbook_version=(
+                    getattr(playbook, "live_version", 0) or playbook.version
+                ),
                 trigger=trigger,
                 inputs=inputs or {},
                 status="running",
                 parent_run_id=parent_run_id,
                 conversation_id=conversation_id,
+                report_to=report_to,
+                is_test=is_test,
+                # plans/032 phase 08: the runtime this run executes under,
+                # decided ONCE here from the object being run (a candidate
+                # shim carries its version row's format).
+                format="python" if _is_python_playbook(playbook) else "pblang",
             )
             session.add(run)
             await session.commit()
@@ -101,7 +868,33 @@ class PlaybookRunner:
             "inputs": inputs,
             "trigger": trigger,
         })
+        return run
 
+    async def _drive_run(
+        self,
+        run: PlaybookRun,
+        playbook: Playbook,
+        inputs: dict[str, Any],
+        *,
+        await_card: bool = False,
+    ) -> None:
+        """Execute a created run to its terminal status (mutates run.status).
+
+        plans/032 phase 08 `await_card`: the run is `parked` on its per-run
+        owner card and this (pblang) task waits for the decision BEFORE
+        `activity.started`, the heartbeat and the first step (Risks 9). A
+        rejection/expiry/cancel was completed by `ParkService` — return."""
+        if await_card:
+            outcome, detail = await self.park.wait_run(run.id)
+            if outcome != "done":
+                # the row is completed by whoever settled the wait (the
+                # decision path / cancel) — no DB read here, so this task
+                # never touches the row under that writer
+                error_type = detail[0] if isinstance(detail, tuple) and detail else "failed"
+                run.status = "cancelled" if error_type == "RunCancelled" else "failed"
+                return
+            run.status = "running"
+            run.parked_on = None
         # 008.006: generic presence channel. The list/brain react to
         # `activity.*` (not `playbook.*`), so any long task can light the same
         # indicators. A heartbeat task beats while the run is alive; its
@@ -121,12 +914,28 @@ class PlaybookRunner:
             "meta": activity_meta,
         })
 
-        definition = PlaybookDef.model_validate(playbook.definition)
+        # plans/032 phase 04: dispatch on the `format` column (a python
+        # definition is a checker summary, never a PlaybookDef — so the v2
+        # branch precedes model_validate). Rows without the column (phase
+        # 02's test rows, transient shims) fall back to sniffing the code.
+        # plans/032 phase 08: the run row's `format` (stamped by _create_run)
+        # is authoritative; the sniff only covers a row without the stamp.
+        run_format = getattr(run, "format", None)
+        is_python = (
+            run_format == "python" if run_format in ("python", "pblang")
+            else _is_python_playbook(playbook)
+        )
+        definition = None if is_python else PlaybookDef.model_validate(playbook.definition)
+        # 0.26.0 (plans/015, 089 §1): the stamped report_to is authoritative
+        # for chat delivery. plans/016 phase 2: no origin fallback — a
+        # background live run stamps None and must NOT deliver to a leaked
+        # origin contextvar; _create_run stamps every run that may deliver.
         context = _RunContext(
             run_id=run.id,
-            inputs=inputs or {},
+            inputs=inputs,
             step_outputs={},
-            conversation_id=conversation_id,
+            conversation_id=run.report_to,
+            is_test=run.is_test,
         )
 
         token = _active_run_id.set(str(run.id))
@@ -135,14 +944,52 @@ class PlaybookRunner:
             self._activity_heartbeat(activity_id, activity_label, activity_meta)
         )
         try:
+            if is_python:
+                # plans/032 phase 02: a v2 playbook runs on the segment loop
+                # under the SAME billing scope as v1's step machinery.
+                with _playbook_origin_scope(playbook):
+                    res = await self._v2.drive(run, playbook, inputs)
+                if res.parked:
+                    # phase 07: the row is `parked`; ParkService owns it now
+                    run.status = "parked"
+                    return
+                await self._complete_run(run.id, "done", result=res.value)
+                run.status = "done"
+                return
             if not definition.steps:
                 raise ValueError(
                     f"Playbook '{playbook.name}' has no steps — nothing to execute. "
                     "Add steps before running."
                 )
-            await self._execute_steps(definition.steps, context)
+            if unsafe_wait := _legacy_wait_step(definition.steps):
+                raise LegacyWaitUnsupported(
+                    f"Legacy pblang step '{unsafe_wait.id}' uses "
+                    f"{unsafe_wait.kind.value}, which has no durable wait gate. "
+                    "Migrate this playbook to the Python runtime before running it."
+                )
+            with _playbook_origin_scope(playbook):
+                await self._execute_steps(definition.steps, context)
             await self._complete_run(run.id, "done")
             run.status = "done"
+        except V2RunError as e:
+            # docs/v2.md §7: the four run columns
+            log.info("playbook.run.v2_failed run_id=%s type=%s", run.id, e.error_type)
+            await self._complete_run(
+                run.id, "failed", error=e.error, error_type=e.error_type,
+                traceback=e.traceback, failed_at=e.failed_at,
+            )
+            run.status = "failed"
+        except LegacyWaitUnsupported as e:
+            await self._complete_run(
+                run.id, "failed", error=str(e), error_type="LegacyWaitUnsupported",
+            )
+            run.status = "failed"
+        except ToolStepTimeout as e:
+            await self._complete_run(
+                run.id, "timed_out_unknown", error=str(e),
+                error_type="OutcomeUnknown", failed_at=datetime.now(timezone.utc),
+            )
+            run.status = "timed_out_unknown"
         except _PlaybookHalt as h:
             # 007.009.01: an explicit `halt` step ended the run early — success.
             log.info("playbook.run.halted run_id=%s reason=%s", run.id, h.reason)
@@ -152,6 +999,13 @@ class PlaybookRunner:
             await self._complete_run(run.id, "failed", error=str(e))
             run.status = "failed"
         except _PlaybookCancel:
+            await self._complete_run(run.id, "cancelled")
+            run.status = "cancelled"
+        except asyncio.CancelledError:
+            # plans/009: cancel_run() cancelled the background task — mark the
+            # run and end cleanly (swallowing is correct in a task context; the
+            # step loop's `except Exception` never eats CancelledError).
+            log.info("playbook.run.cancelled run_id=%s", run.id)
             await self._complete_run(run.id, "cancelled")
             run.status = "cancelled"
         except Exception as e:
@@ -180,14 +1034,12 @@ class PlaybookRunner:
             message_source.reset(source_token)
             _active_run_id.reset(token)
 
-        return run
-
     async def _activity_heartbeat(
         self, activity_id: str, label: str, meta: dict[str, Any]
     ) -> None:
         """008.006: emit a steady `activity.heartbeat` while a run is alive.
 
-        Started in `start_run` and cancelled in its `finally`. Emit-then-sleep
+        Started in `_drive_run` and cancelled in its `finally`. Emit-then-sleep
         so the first beat fires immediately after `activity.started`. Clients
         treat `running = (now - lastBeat) < TTL`; if this loop stops without an
         `activity.completed` (crash), the indicator clears on its own. `meta`
@@ -206,20 +1058,22 @@ class PlaybookRunner:
         self,
         playbook: Playbook,
         inputs: dict[str, Any] | None = None,
+        stubs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Simulate a run WITHOUT side effects: real control flow (loops,
         conditions, parallel, subtask, templates, expressions) but every
         effectful leaf (tool_call / agent_step / llm_step / wait_*) is stubbed.
         Writes nothing to the DB. Returns a trace of resolved args / branches /
-        iteration counts — the playbook "test run".
+        iteration counts — the playbook simulation.
         """
         definition = PlaybookDef.model_validate(playbook.definition)
         ctx = _RunContext(
             run_id=uuid.uuid4(),
-            inputs=inputs or {},
+            inputs=_coerce_inputs(playbook, inputs or {}),
             step_outputs={},
         )
         ctx.dry = True
+        ctx.stubs = stubs or {}
         status = "done"
         error: str | None = None
         try:
@@ -258,7 +1112,32 @@ class PlaybookRunner:
         }
 
     async def cancel_run(self, run_id: Any) -> None:
-        """Cancel a running playbook."""
+        """Cancel a running playbook.
+
+        plans/009: background runs are ACTUALLY stopped — the task is
+        cancelled and `_drive_run`'s CancelledError handler marks the run
+        (previously this only flipped the DB flag while every remaining step
+        kept executing). The DB fallback below covers runs with no live task.
+
+        Phase 07: a `parked` run has no task — `ParkService.release` rejects
+        the card / drops the subscription and fails the parking entry, then
+        the run completes `cancelled` (`playbook.run.completed` fires).
+        """
+        async with self._sf() as session:
+            run = await session.get(PlaybookRun, run_id)
+            status = run.status if run is not None else None
+        if status == "parked":
+            released = await self.park.release(
+                run_id, reason=f"playbook run {run_id} cancelled",
+                error_type="RunCancelled", message="run cancelled",
+            )
+            if released is not None:
+                await self._complete_run(run_id, "cancelled")
+                return
+        task = self._tasks.get(run_id)
+        if task is not None and not task.done():
+            task.cancel()
+            return
         async with self._sf() as session:
             run = await session.get(PlaybookRun, run_id)
             if run and run.status == "running":
@@ -318,6 +1197,24 @@ class PlaybookRunner:
             except Exception as e:
                 attempt += 1
                 await self._update_step_retry(step_run.id, attempt)
+
+                if isinstance(e, ToolStepTimeout):
+                    # A cancelled call may already have committed. Neither
+                    # retry nor on_error:continue may cross this boundary.
+                    await self._complete_step(
+                        step_run.id, "timed_out_unknown", error=str(e),
+                    )
+                    try:
+                        await self._events.emit("playbook.step.failed", {
+                            "run_id": str(ctx.run_id),
+                            "step_id": step.id,
+                            "error": str(e),
+                            "error_type": "OutcomeUnknown",
+                            "retry_count": attempt,
+                        })
+                    except Exception:  # noqa: BLE001 -- preserve unknown outcome
+                        log.exception("playbook.step.unknown_event_failed step=%s", step.id)
+                    raise
 
                 if attempt <= max_retries:
                     backoff = step.retry.backoff_seconds * (2 ** (attempt - 1))
@@ -385,11 +1282,30 @@ class PlaybookRunner:
             StepKind.LOOP: self._run_loop,
             StepKind.STATE: self._run_state,
             StepKind.HALT: self._run_halt,
+            StepKind.CODE: self._run_code,
         }
         handler = handlers.get(step.kind)
         if not handler:
             raise ValueError(f"Unknown step kind: {step.kind}")
         return await handler(step, ctx)
+
+    async def _resolve_vault_refs(self, args: Any, *, step_id: str) -> Any:
+        """plans/031: resolve `vault:<name>` argument values through ctx.vault.
+
+        The agent dispatch gate does this for direct tool calls
+        (luna.agent.vault_refs); playbook steps invoke handlers straight from
+        the registry and used to send the literal ref — e.g. an `x-api-key`
+        header of "vault:foo" — which the remote API rightly rejected.
+
+        Resolution happens on a copy handed only to the handler; step_inputs,
+        run transcripts, and events keep the ref, never the secret. ACL: the
+        read is the playbook plugin's own ctx.vault, so cross-plugin
+        credentials need a grant to plugin-playbooks — same rule as playbook
+        code reading them any other way.
+        """
+        return await resolve_vault_refs(
+            getattr(self._ctx, "vault", None), args, step_id=step_id,
+        )
 
     async def _run_tool_call(self, step: StepDef, ctx: _RunContext) -> Any:
         """Execute a tool_call step — calls a registered tool by name."""
@@ -399,9 +1315,52 @@ class PlaybookRunner:
         args = _render_template_dict(step.args or {}, ctx, step_id=step.id)
         ctx.step_inputs[step.id] = args
         if ctx.dry:
+            # plans/022 P5 (RC4): dry runs perform the SAME tool-existence
+            # check as the live path — a playbook naming a nonexistent tool
+            # used to dry-run green and then fail live, feeding false
+            # diagnoses. Stubbed or not, an unknown tool fails the dry run.
+            try:
+                self._tools.get(step.tool)
+            except KeyError:
+                raise ValueError(
+                    f"Step '{step.id}': unknown tool '{step.tool}' — it is "
+                    "not in the tool registry. The playbook definition "
+                    "references a tool that does not exist (a live run "
+                    "would fail here too)."
+                ) from None
             # No execution. Stub the result from the tool's output hints if any,
             # but always surface the RESOLVED args (proves templates rendered).
-            return {"tool": step.tool, "resolved_args": args, "result": {"_dry": True}, "_dry": True}
+            # Phase 4: a scripted stub (step-id wins over tool-name) sets the
+            # result so downstream templates see fixture-shaped data.
+            if step.id in ctx.stubs or step.tool in ctx.stubs:
+                scripted = ctx.stubs.get(step.id, ctx.stubs.get(step.tool))
+                return {"tool": step.tool, "resolved_args": args, "result": scripted,
+                        "stubbed": True, "_dry": True}
+            # plans/022 P5 + plans/026: self-describing AND navigable — a
+            # transcript reader must never mistake this for evidence the tool
+            # ran, yet downstream `steps.<id>.result.<field>` refs must
+            # resolve (to `<dry:...>`) so the playbook smoke-tests unstubbed.
+            note = "simulated — tool was NOT called"
+            return {"tool": step.tool, "resolved_args": args,
+                    "result": _DryStub(step.tool, note),
+                    "_note": note, "_dry": True}
+        # plans/016 phase 2: the stamped report_to is authoritative for tool
+        # steps too, not just agent steps. A chat send that names no
+        # conversation inherits the run's — and a background live run HAS
+        # none (the ops chat carries exceptions only), so the step must say
+        # where its message goes instead of leaning on core's ops fallback.
+        if step.tool == "send_chat_message" and not args.get("conversation_id"):
+            if ctx.conversation_id is not None:
+                args["conversation_id"] = str(ctx.conversation_id)
+                ctx.step_inputs[step.id] = args
+            elif not ctx.is_test:
+                raise ValueError(
+                    f"Step '{step.id}': this run has no chat to report to — "
+                    "scheduled/background runs no longer deliver to the ops "
+                    "chat. Give the send_chat_message step an explicit "
+                    "conversation_id, or deliver through another channel "
+                    "(email, slack, ...)."
+                )
         try:
             rt = self._tools.get(step.tool)
         except KeyError:
@@ -410,8 +1369,77 @@ class PlaybookRunner:
                 "the tool registry. The playbook definition references a tool "
                 "that does not exist."
             ) from None
-        result = await rt.handler(**args)
-        return {"tool": step.tool, "result": result}
+        call_args = await self._resolve_vault_refs(args, step_id=step.id)
+        if step.timeout is None:
+            result = await rt.handler(**call_args)
+        else:
+            try:
+                result = await asyncio.wait_for(
+                    rt.handler(**call_args), timeout=step.timeout,
+                )
+            except TimeoutError as exc:
+                raise ToolStepTimeout(
+                    f"Step '{step.id}' tool call timed out after {step.timeout}s; "
+                    "the effect may have committed. Inspect its state before retrying."
+                ) from exc
+        return {"tool": step.tool, "result": _normalize_tool_result(result)}
+
+    async def _run_code(self, step: StepDef, ctx: _RunContext) -> Any:
+        """plans/004: jailed Python via plugin-inline-code-run's code_run.
+
+        The rendered code_inputs reach the body as the `inputs` dict; the
+        body's return value becomes steps.<id>.result.
+        """
+        if not step.source:
+            raise ValueError(f"Step '{step.id}': code step requires 'source'")
+        rendered = _render_template_dict(step.code_inputs or {}, ctx,
+                                         step_id=step.id)
+        ctx.step_inputs[step.id] = {"inputs": rendered}
+        if ctx.dry:
+            if step.id in ctx.stubs:
+                return {"result": ctx.stubs[step.id],
+                        "resolved_inputs": rendered,
+                        "stubbed": True, "_dry": True}
+            # plans/022 P5 + plans/026: self-describing, navigable stub
+            # (code body NOT executed).
+            note = "simulated — code was NOT executed"
+            return {"result": _DryStub(step.id, note),
+                    "resolved_inputs": rendered,
+                    "_note": note, "_dry": True}
+        try:
+            rt = self._tools.get("code_run")
+        except KeyError:
+            raise ValueError(
+                f"Step '{step.id}': code steps need plugin-inline-code-run "
+                "(tool 'code_run') installed on this agent — it is not in "
+                "the tool registry."
+            ) from None
+        raw = await rt.handler(
+            code=step.source,
+            input_json=await self._resolve_vault_refs(rendered, step_id=step.id),
+            timeout_sec=step.timeout,
+            title=f"playbook code step '{step.id}'",
+        )
+        payload = _normalize_tool_result(raw)
+        if not isinstance(payload, dict):
+            raise ValueError(
+                f"Step '{step.id}': code_run returned an unexpected result")
+        if not payload.get("ok"):
+            if payload.get("timed_out"):
+                raise ValueError(
+                    f"Step '{step.id}': code timed out "
+                    f"(timeout={step.timeout or 60}s)")
+            detail = str(payload.get("error") or payload.get("stderr")
+                         or "").strip()[-2000:]
+            raise ValueError(
+                f"Step '{step.id}': code failed "
+                f"(exit {payload.get('exit_code')}): {detail}")
+        if "result_error" in payload:
+            raise ValueError(f"Step '{step.id}': {payload['result_error']}")
+        out: dict[str, Any] = {"result": payload.get("result")}
+        if payload.get("stdout"):
+            out["stdout"] = payload["stdout"]
+        return out
 
     async def _run_agent_step(self, step: StepDef, ctx: _RunContext) -> Any:
         """Execute an agent_step — full LLM turn via run_turn()."""
@@ -421,6 +1449,8 @@ class PlaybookRunner:
             # Render the prompt (exercises templates) but never call the model.
             rendered = _render_template(step.prompt, ctx, step_id=step.id)
             ctx.step_inputs[step.id] = {"prompt": rendered[:2000]}
+            if step.id in ctx.stubs:
+                return ctx.stubs[step.id]
             return _stub_from_schema(step.output_schema)
         # 008.993 (E10): the agent is injected as ctx.agent (the sub-agent/turn
         # facade) at on_load — no more building one here from luna.agent.*.
@@ -467,6 +1497,8 @@ class PlaybookRunner:
             if step.system:
                 _render_template(step.system, ctx, step_id=step.id)
             ctx.step_inputs[step.id] = {"prompt": rendered[:2000]}
+            if step.id in ctx.stubs:
+                return ctx.stubs[step.id]
             return _stub_from_schema(step.output_schema)
         agent = self._agent
         if not agent:
@@ -493,11 +1525,17 @@ class PlaybookRunner:
         return result if isinstance(result, dict) else {"_raw": result}
 
     async def _run_condition(self, step: StepDef, ctx: _RunContext) -> Any:
-        """Evaluate a condition and branch."""
+        """Evaluate a condition and branch.
+
+        plans/022 P5b: STRICT evaluation, like loop over/until (006.707).
+        Non-strict eval returned False on ANY exception — during the
+        meltdown live conditions silently picked the else branch when their
+        expression failed to evaluate. An un-evaluable condition now fails
+        the step loudly with the rendered error, never picks a branch."""
         if not step.when:
             raise ValueError(f"Step '{step.id}': condition requires 'when' field")
 
-        result = _eval_expression(step.when, ctx)
+        result = _eval_expression(step.when, ctx, strict=True, step_id=step.id)
         if result:
             if step.then:
                 await self._execute_steps(step.then, ctx)
@@ -521,35 +1559,30 @@ class PlaybookRunner:
 
         tasks = [_run_branch(b) for b in step.branches]
         branch_results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Ordinary branch errors retain the historical per-branch result.
+        # An uncertain external effect is a run-wide stop condition: it must
+        # not be converted into a harmless-looking parallel result.
+        for result in branch_results:
+            if isinstance(result, ToolStepTimeout):
+                raise result
         return {"branches": [
             r if not isinstance(r, Exception) else {"error": str(r)}
             for r in branch_results
         ]}
 
     async def _run_wait_for_approval(self, step: StepDef, ctx: _RunContext) -> Any:
-        """Pause and wait for owner approval."""
-        await self._events.emit("playbook.step.waiting", {
-            "run_id": str(ctx.run_id),
-            "step_id": step.id,
-            "reason": "approval",
-        })
-        # For v1: auto-approve after emitting the event.
-        # Full approval integration comes when plugin_approvals is wired.
-        return {"approved": True, "auto": True}
+        """Refuse a legacy approval wait if direct step dispatch bypassed preflight."""
+        raise LegacyWaitUnsupported(
+            f"Legacy pblang step '{step.id}' has no durable approval gate; "
+            "migrate this playbook to the Python runtime."
+        )
 
     async def _run_wait_for_event(self, step: StepDef, ctx: _RunContext) -> Any:
-        """Wait for a matching bus event."""
-        if not step.event:
-            raise ValueError(f"Step '{step.id}': wait_for_event requires 'event' field")
-
-        await self._events.emit("playbook.step.waiting", {
-            "run_id": str(ctx.run_id),
-            "step_id": step.id,
-            "reason": "event",
-        })
-        # For v1: return immediately with a stub.
-        # Full event waiting needs a future/queue pattern on the bus.
-        return {"event": step.event, "received": False, "stub": True}
+        """Refuse a legacy event wait if direct step dispatch bypassed preflight."""
+        raise LegacyWaitUnsupported(
+            f"Legacy pblang step '{step.id}' has no durable event wait; "
+            "migrate this playbook to the Python runtime."
+        )
 
     async def _run_subtask(self, step: StepDef, ctx: _RunContext) -> Any:
         """Invoke another playbook as a subtask."""
@@ -570,6 +1603,7 @@ class PlaybookRunner:
             sub_def = PlaybookDef.model_validate(target.definition)
             sub_ctx = _RunContext(run_id=uuid.uuid4(), inputs=mapped_inputs, step_outputs={})
             sub_ctx.dry = True
+            sub_ctx.stubs = ctx.stubs
             try:
                 await self._execute_steps(sub_def.steps, sub_ctx)
             except _PlaybookHalt:
@@ -583,7 +1617,13 @@ class PlaybookRunner:
             inputs=mapped_inputs,
             trigger=f"subtask:{ctx.run_id}",
             parent_run_id=ctx.run_id,
+            is_test=ctx.is_test,
         )
+        if sub_run.status == "timed_out_unknown":
+            raise ToolStepTimeout(
+                f"Subtask '{step.playbook}' run {sub_run.id} has an unknown "
+                "external outcome; inspect its state before retrying the parent."
+            )
         out = {"subtask_run_id": str(sub_run.id), "status": sub_run.status}
         # 007.009.01: surface sub-workflow outputs to the parent so it can read
         # steps.<subtask_id>.<key>.
@@ -660,6 +1700,10 @@ class PlaybookRunner:
                 items = list(step.over)
             else:
                 items = _eval_expression(step.over, ctx, strict=True, step_id=step.id)
+            # plans/026: `over` an unstubbed dry placeholder iterates zero
+            # times (the scalar-wrap below would fake ONE bogus iteration).
+            if isinstance(items, _DryStub):
+                items = []
             if not isinstance(items, (list, tuple)):
                 items = [items]
             items = list(items)
@@ -745,8 +1789,10 @@ class PlaybookRunner:
                     inputs=ctx.inputs,
                     step_outputs=dict(ctx.step_outputs),
                     conversation_id=ctx.conversation_id,
+                    is_test=ctx.is_test,
                 )
                 child.dry = ctx.dry
+                child.stubs = ctx.stubs
                 child.vars = dict(ctx.vars)
                 child.step_outputs[f"{step.id}._item"] = item
                 child.step_outputs[f"{step.id}._index"] = index
@@ -887,31 +1933,91 @@ class PlaybookRunner:
 
     async def _complete_run(
         self, run_id: Any, status: str, error: str | None = None,
+        error_type: str | None = None, traceback: str | None = None,
+        failed_at: datetime | None = None, result: Any = None,
     ) -> None:
         async with self._sf() as session:
             run = await session.get(PlaybookRun, run_id)
             if run:
                 run.status = status
                 run.completed_at = datetime.now(timezone.utc)
+                # plans/032 phase 08: what `run()` returned (python runs;
+                # secrets already scrubbed by the loop). v1 runs pass None.
+                if result is not None:
+                    run.result = result
+                # plans/032 phase 02 (docs/v2.md §7): the error contract
+                # columns. v1 runs land `error` only; v2 fills all four.
+                if error is not None:
+                    run.error = error
+                if error_type is not None:
+                    run.error_type = error_type
+                if traceback is not None:
+                    run.traceback = traceback
+                if failed_at is not None:
+                    run.failed_at = failed_at
+                elif status == "failed" and run.failed_at is None:
+                    run.failed_at = run.completed_at
                 await session.commit()
 
         started_at = None
         completed_at = datetime.now(timezone.utc)
+        playbook_id = None
+        playbook_version = None
+        is_test = False
+        trigger = None
+        conversation_id = None
+        parent_run_id = None
+        wake_on_complete = False
+        playbook_name = None
         async with self._sf() as session:
             run = await session.get(PlaybookRun, run_id)
             if run:
                 started_at = run.started_at
+                playbook_id = run.playbook_id
+                playbook_version = run.playbook_version
+                is_test = bool(run.is_test)
+                trigger = run.trigger
+                conversation_id = run.conversation_id
+                parent_run_id = run.parent_run_id
+                wake_on_complete = bool(getattr(run, "wake_on_complete", False))
+                playbook = await session.get(Playbook, run.playbook_id)
+                if playbook:
+                    playbook_name = playbook.name
 
         if started_at is not None and started_at.tzinfo is None:
             # sqlite returns naive datetimes; stored values are UTC
             started_at = started_at.replace(tzinfo=timezone.utc)
         duration_ms = int((completed_at - started_at).total_seconds() * 1000) if started_at else 0
-        await self._events.emit("playbook.run.completed", {
-            "run_id": str(run_id),
-            "status": status,
-            "duration_ms": duration_ms,
-            "error": error,
-        })
+        # plans/016 phase 4: this event announces a FINISHED run, but it is
+        # emitted while _active_run_id is still set (the finally in _drive_run
+        # resets it later). Background subscribers copy the emit-time context
+        # into their tasks, so the leaked var made the ops wake turn's
+        # run tools refuse as "nested" — the very tools 0.31.1 un-hid for it.
+        # Neutralize it for the emit: nothing downstream is inside this run.
+        token = _active_run_id.set(None)
+        try:
+            await self._events.emit("playbook.run.completed", {
+                "run_id": str(run_id),
+                "status": status,
+                "duration_ms": duration_ms,
+                "error": error,
+                # 0.26.0 (plans/015, 089 §4): identity for the fix-proposal
+                # service — it must skip test runs and dedupe per playbook.
+                "playbook_id": str(playbook_id) if playbook_id else None,
+                "playbook_version": playbook_version,
+                "is_test": is_test,
+                # 0.44.0 (plans/028): identity + routing for the wake service.
+                "playbook_name": playbook_name,
+                "trigger": trigger,
+                "conversation_id": str(conversation_id) if conversation_id else None,
+                "parent_run_id": str(parent_run_id) if parent_run_id else None,
+                "wake_on_complete": wake_on_complete,
+                # plans/032 phase 08: the additive LAST key — `run()`'s return
+                # value for a done python run, None for v1 and failed runs.
+                "result": result,
+            })
+        finally:
+            _active_run_id.reset(token)
 
 
 class _RunContext:
@@ -923,11 +2029,15 @@ class _RunContext:
         inputs: dict[str, Any],
         step_outputs: dict[str, Any],
         conversation_id: Any = None,
+        is_test: bool = False,
     ) -> None:
         self.run_id = run_id
         self.inputs = inputs
         self.step_outputs = step_outputs
         self.conversation_id = conversation_id
+        # 0.26.0 (plans/015, 089 §1): test runs propagate the flag into their
+        # subtask runs so a draft test never pollutes production stats.
+        self.is_test = is_test
         # 006.712: loop `item_name` exposes the current item as a top-level
         # template var ({{ number }}) — friendlier than steps.<id>._item.
         self.extra_vars: dict[str, Any] = {}
@@ -942,6 +2052,9 @@ class _RunContext:
         # an in-memory trace instead of step rows.
         self.dry: bool = False
         self.trace: list[dict[str, Any]] = []
+        # plans/002 phase 4: dry-run stubs — step-id or tool-name → scripted
+        # output. Step-id keys win. Only consulted when self.dry is True.
+        self.stubs: dict[str, Any] = {}
         # 007.009.01: run-scoped mutable state — survives across loop
         # iterations. A `state` step reads/writes these; templates see `vars.*`.
         self.vars: dict[str, Any] = {}
@@ -1198,9 +2311,9 @@ def _render_template(template: str, ctx: _RunContext, *, step_id: str = "") -> s
             return template
         raise ValueError(
             f"Step '{step_id}': template '{template}' failed to render "
-            f"({type(e).__name__}: {e}). Available variables: "
-            f"{_available_vars(ctx)}. Inside a loop use the loop's "
-            "item_name, or steps.<loop_id>._item / ._index."
+            f"({type(e).__name__}: {e})." + _dry_stub_hint(template, ctx) +
+            f" Available variables: {_available_vars(ctx)}. Inside a loop use "
+            "the loop's item_name, or steps.<loop_id>._item / ._index."
         ) from e
 
 
@@ -1217,6 +2330,89 @@ def _render_template_dict(
         else:
             result[k] = v
     return result
+
+
+# 0.14.2: a `steps.<id>` reference chain — dot or bracket segments — so an
+# undefined reference can be diagnosed against the step's REAL output keys
+# instead of a hardcoded (and often wrong) "schemaless llm_step" guess.
+_STEP_PATH = re.compile(
+    r"\bsteps(?:\.([A-Za-z_]\w*)|\[[\"']([^\"'\]]+)[\"']\])"
+    r"((?:\.[A-Za-z_]\w*|\[[\"'][^\"'\]]+[\"']\])*)"
+)
+_PATH_SEG = re.compile(r"\.([A-Za-z_]\w*)|\[[\"']([^\"'\]]+)[\"']\]")
+
+
+def _is_dry_placeholder(out: Any) -> bool:
+    """True when a step's recorded output is a dry-run simulation placeholder
+    (an *unstubbed* tool_call or code step during dry_run).
+
+    A stubbed step's wrapper also carries top-level ``_dry: True`` (the run is
+    still a dry run) but is NOT a placeholder — its ``result`` is scripted by
+    the caller. Those wrappers set ``stubbed: True``, so exclude them; otherwise a
+    stubbed-but-wrong-shape stub (e.g. a bare list where a dict was expected)
+    would be falsely reported as "not stubbed"."""
+    return (
+        isinstance(out, dict)
+        and out.get("_dry") is True
+        and out.get("stubbed") is not True
+    )
+
+
+def _dry_stub_hint(expr: str, ctx: "_RunContext") -> str:
+    """If `expr` references any step whose output is a dry-run placeholder,
+    name those steps and tell the author to stub them. Empty string otherwise.
+
+    This is the actionable form of the otherwise-cryptic "keys: _dry, _note"
+    failure: in a dry run, an unstubbed tool_call or code step returns a
+    simulated placeholder, so any template reading a field off it fails."""
+    hits: list[str] = []
+    for m in _STEP_PATH.finditer(expr):
+        sid = m.group(1) or m.group(2)
+        if _is_dry_placeholder(ctx.step_outputs.get(sid)):
+            hits.append(sid)
+    if not hits:
+        return ""
+    uniq = ", ".join(sorted(set(hits)))
+    return (
+        f" Step(s) [{uniq}] were not stubbed and returned a simulated dry-run "
+        "placeholder — add a `stubs` entry for each so its output "
+        "is defined."
+    )
+
+
+def _undefined_ref_detail(expr: str, ctx: "_RunContext") -> str:
+    """Walk each `steps.<id>...` chain in `expr` against the outputs that
+    actually exist and name the first segment that doesn't resolve, plus the
+    keys present at that level. Empty string when nothing diagnosable."""
+    details: list[str] = []
+    for m in _STEP_PATH.finditer(expr):
+        sid = m.group(1) or m.group(2)
+        if sid not in ctx.step_outputs:
+            details.append(f"steps.{sid} has no output yet (it did not run before this step)")
+            continue
+        node: Any = ctx.step_outputs[sid]
+        path = f"steps.{sid}"
+        for a, b in _PATH_SEG.findall(m.group(3) or ""):
+            seg = a or b
+            if isinstance(node, dict) and seg in node:
+                node = node[seg]
+                path += f".{seg}"
+            else:
+                if _is_dry_placeholder(node):
+                    details.append(
+                        f"{path}.{seg} does not exist — {path} is a simulated "
+                        f"dry-run placeholder because step '{sid}' was not "
+                        "stubbed; add a `stubs` entry for it"
+                    )
+                    break
+                have = (
+                    f"a dict with keys: {', '.join(node.keys())}"
+                    if isinstance(node, dict)
+                    else f"of type {type(node).__name__}, not a dict"
+                )
+                details.append(f"{path}.{seg} does not exist — {path} is {have}")
+                break
+    return "; ".join(details)
 
 
 def _eval_expression(
@@ -1256,6 +2452,16 @@ def _eval_expression(
         # to Undefined — strict collect now raises here instead of appending
         # null for every iteration while the run reports "done".
         if strict and isinstance(result, Undefined):
+            # 0.14.2: diagnose against the REAL output — the old hardcoded
+            # "schemaless llm_step" hint sent agents fixing the wrong side
+            # (deleting a correct `result` wrapper on a tool_call ref).
+            detail = _undefined_ref_detail(expr, ctx)
+            if detail:
+                raise ValueError(
+                    f"reference resolved to undefined — {detail}. Fix the "
+                    "path to match these real keys (tool_call output is "
+                    "{tool, result} — the tool's payload sits under .result)"
+                )
             raise ValueError(
                 f"reference resolved to undefined "
                 f"(a schemaless llm_step/agent_step has only `_raw`; "
@@ -1272,7 +2478,8 @@ def _eval_expression(
             ) or "inputs.*, steps.<step_id>.*"
             raise ValueError(
                 f"Step '{step_id}': expression '{expr}' failed to evaluate "
-                f"({type(e).__name__}: {e}). Available variables: {available}. "
+                f"({type(e).__name__}: {e})." + _dry_stub_hint(expr, ctx) +
+                f" Available variables: {available}. "
                 "Inside a loop use steps.<loop_id>._item and steps.<loop_id>._index."
             ) from e
 

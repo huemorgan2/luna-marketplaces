@@ -41,6 +41,8 @@ KIND_KEYS: dict[str, set[str]] = {
     # 007.009.01
     "state": {"state"},
     "halt": {"when", "value"},
+    # plans/004
+    "code": {"source", "code_inputs"},
 }
 
 # 007.009.01: the documented output shape per step kind. The bad-ref-shape
@@ -56,6 +58,8 @@ KIND_OUTPUT_KEYS: dict[str, set[str]] = {
     "state": {"ops"},
     "subtask": {"subtask_run_id", "status", "subtask", "steps"},
     "halt": {"halted", "value"},
+    # plans/004: the code body's return value is `result`.
+    "code": {"result", "stdout"},
     # agent_step / llm_step are schema-dependent — handled specially.
 }
 
@@ -181,8 +185,8 @@ def validate_definition(
     """Return all validation issues for a playbook definition. Never raises on a
     bad playbook (reports instead). Raises only on a non-mapping input.
 
-    `check_unknown_keys` only makes sense for the agent's HAND-WRITTEN YAML
-    (yaml.safe_load output) — pydantic silently drops unknown keys there, so a
+    `check_unknown_keys` only makes sense for a HAND-WRITTEN definition
+    (a raw JSON object) — pydantic silently drops unknown keys there, so a
     typo like `iteratot:` would vanish. Never enable it for a stored/round-
     tripped definition (model_dump emits defaulted keys like `fan_in`/
     `max_iterations` on every step, which would all look "unknown").
@@ -218,7 +222,7 @@ def validate_definition(
     )
     _check_required_steps(raw_steps, issues)
 
-    # 2. unknown-key typo detection — ONLY on agent-authored YAML
+    # 2. unknown-key typo detection — ONLY on hand-written raw definitions
     if check_unknown_keys and raw_dict is not None:
         _check_unknown_keys_steps(raw_steps, issues)
 
@@ -326,6 +330,8 @@ def _req(step: dict, kind: str, sid: Any, issues: list[ValidationIssue]) -> None
         err("wait_for_event requires 'event'", "event")
     if kind == "state" and not step.get("state"):
         err("state requires at least one op in 'state'", "state")
+    if kind == "code" and not step.get("source"):
+        err("code requires 'source' (the Python body)", "source")
     if kind == "loop":
         has_count = "count" in step
         if (
@@ -554,6 +560,23 @@ def _check_leaf(
             _check_source(step.when, is_expr=True, step_id=step.id, field="when", **kw)
         if isinstance(step.value, str):
             _check_source(step.value, is_expr=True, step_id=step.id, field="value", **kw)
+    if step.kind == StepKind.CODE:
+        # plans/004: code_inputs values are templated; the source body is real
+        # Python and deliberately NOT template-checked (braces in f-strings /
+        # dicts would false-positive).
+        if tool_registry is not None:
+            try:
+                tool_registry.get("code_run")
+            except KeyError:
+                issues.append(ValidationIssue(
+                    "warning", "code steps need plugin-inline-code-run "
+                    "(tool 'code_run'), which is not installed on this agent",
+                    step_id=step.id, field="source",
+                    hint="install plugin-inline-code-run from the marketplace; "
+                    "publish will refuse until the tool is available",
+                ))
+        for key, val in (step.code_inputs or {}).items():
+            _check_value(val, step_id=step.id, field=f"code_inputs.{key}", **kw)
 
 
 def _check_value(val: Any, **kw: Any) -> None:

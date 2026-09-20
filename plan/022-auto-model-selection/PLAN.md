@@ -1,5 +1,7 @@
 # 022 — AUTO model selection in the chat picker
 
+> Release follow-up: [plan 024](../024-auto-main-integration/PLAN.md) integrates this feature with current main as chat-ui **0.30.3**, preserving the released 0.30.2 changes.
+
 **Produces version:** plugin-chat-ui 0.30.0. User explicitly authorized plan and execution on 2026-09-20.
 
 ## Context

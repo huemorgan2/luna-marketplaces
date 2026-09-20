@@ -1,7 +1,7 @@
 """PlaybookDef / StepDef — pydantic models for playbook definitions.
 
 These are the user-facing data structures for defining playbooks.
-They validate the YAML/JSON and compile to the DB JSON column.
+They validate the JSON IR and compile to the DB JSON column.
 """
 
 from __future__ import annotations
@@ -9,7 +9,6 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
 
-import yaml
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -26,6 +25,8 @@ class StepKind(str, Enum):
     # 007.009.01: run-scoped state + early return.
     STATE = "state"
     HALT = "halt"
+    # plans/004: jailed Python via plugin-inline-code-run's code_run tool.
+    CODE = "code"
 
 
 # 007.009.01: ops a `state` step can apply to a run-scoped variable. One `state`
@@ -158,6 +159,13 @@ class StepDef(BaseModel):
     # state (007.009.01)
     state: list[StateOp] | None = None
 
+    # code (plans/004): `source` (not `code` — that name is the authoritative
+    # source column on Playbook) is the Python body run jailed by the
+    # code_run tool; `code_inputs` values are templated and reach the body as
+    # the `inputs` dict; the body's return value becomes steps.<id>.result.
+    source: str | None = None
+    code_inputs: dict[str, Any] | None = None
+
     # halt (007.009.01): optional guard + final value (the run's result).
     value: Any | None = None
 
@@ -255,17 +263,3 @@ def detect_subtask_cycles(
         if result is not None:
             return [playbook_name] + result
     return None
-
-
-def parse_yaml(text: str) -> PlaybookDef:
-    """Parse a YAML playbook definition string."""
-    data = yaml.safe_load(text)
-    if not isinstance(data, dict):
-        raise ValueError("Playbook definition must be a YAML mapping")
-    return PlaybookDef.model_validate(data)
-
-
-def to_yaml(playbook: PlaybookDef) -> str:
-    """Serialize a PlaybookDef to YAML."""
-    data = playbook.model_dump(mode="json", exclude_none=True, by_alias=True)
-    return yaml.dump(data, default_flow_style=False, sort_keys=False)
