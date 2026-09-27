@@ -1,4 +1,4 @@
-import { memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Plus, Send, Trash2, Loader2, MoreHorizontal, MoreVertical, Check, X, Copy, ChevronDown, ChevronUp, ChevronLeft, Info, Square, Clock, Wrench, Paperclip, FileText, Brain, Zap, Hand, Settings } from 'lucide-react'
@@ -455,6 +455,9 @@ interface UIMessage {
   // turn streams — code shown at once, output as it happens, folds on close.
   // Not persisted; a reload renders the tool's embed_iframe card instead.
   live_runs?: LiveRun[]
+  // 120: the LIST route cut content/reasoning at its per-row cap (64 KB);
+  // the bubble grows a "Show full message" link that fetches the single row.
+  truncated?: boolean
 }
 
 // 008.95: a file staged in the composer, uploading (or awaiting a
@@ -489,6 +492,78 @@ const EMPTY_TURN: TurnUI = {
   condensing: false,
 }
 const NO_MESSAGES: UIMessage[] = []
+
+// 120 (plan 022): GET /messages is a bounded window now — the newest PAGE_SIZE
+// rows plus paging headers. The load itself is capped at LOAD_TIMEOUT_MS so a
+// spinner can never outlive the proxy's edge timeout, and every failure is
+// rendered (card + Retry) instead of swallowed into the empty greeting.
+const PAGE_SIZE = 200
+const LOAD_TIMEOUT_MS = 60_000
+interface LoadedWindow { rows: ApiMessage[]; hasMore: boolean; nextBefore: string | null; total: number }
+interface PagingState { hasMore: boolean; nextBefore: string | null; total: number }
+const NO_PAGING: PagingState = { hasMore: false, nextBefore: null, total: 0 }
+
+/** One window of a conversation. Older shells (no api.messagesPage — the
+ *  plugin updates through the marketplace independently of the core) fall
+ *  back to the unbounded route and report "no more". */
+async function fetchWindow(
+  id: string,
+  opts: { limit?: number; before?: string; signal?: AbortSignal },
+): Promise<LoadedWindow> {
+  if (typeof api.messagesPage === 'function') {
+    const p = await api.messagesPage(id, opts)
+    return { rows: p.rows, hasMore: !!p.hasMore, nextBefore: p.nextBefore ?? null, total: p.total ?? p.rows.length }
+  }
+  const rows = await api.messages(id)
+  return { rows, hasMore: false, nextBefore: null, total: rows.length }
+}
+
+function abortError(): Error {
+  const e = new Error('aborted')
+  e.name = 'AbortError'
+  return e
+}
+
+/** Reject when `signal` aborts even if the underlying fetch ignores it. */
+function raceAbort<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortError())
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortError())
+    signal.addEventListener('abort', onAbort, { once: true })
+    p.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+  })
+}
+
+/** One-line reason for the load-error card. */
+export function loadErrorReason(e: unknown): string {
+  if ((e as { name?: string } | null)?.name === 'AbortError') return `timed out after ${LOAD_TIMEOUT_MS / 1000} s`
+  const status = (e as { httpStatus?: number } | null)?.httpStatus
+  if (typeof status === 'number') return `HTTP ${status}`
+  const msg = e instanceof Error ? e.message : ''
+  return msg && msg !== 'Failed to fetch' ? msg : 'network error'
+}
+
+/** 120: a resync fetches the DEFAULT window only. Rows the user paged in
+ *  earlier (older than the fresh window's oldest row) stay in front of it, so
+ *  a finished turn never silently throws away what was loaded. Local
+ *  in-flight bubbles are dropped as before — the fresh rows ARE their truth. */
+export function mergeWindow(prev: UIMessage[], fresh: UIMessage[]): UIMessage[] {
+  if (fresh.length === 0) return fresh
+  const oldest = Date.parse(fresh[0].created_at ?? '')
+  if (!Number.isFinite(oldest)) return fresh
+  const ids = new Set(fresh.map((m) => m.id))
+  const kept = prev.filter(
+    (m) => !m.id.startsWith('local-') && !ids.has(m.id) && !!m.created_at && Date.parse(m.created_at) < oldest,
+  )
+  return kept.length ? [...kept, ...fresh] : fresh
+}
+
+// 120: the bubble's "Show full message" link needs the conversation id and a
+// way to swap the truncated row for the full one; provided by ChatPanel.
+const ExpandRowContext = createContext<{
+  convId: string | null
+  expand: (convId: string, msgId: string) => Promise<void>
+} | null>(null)
 
 // 089: a conversation row as this UI handles it — the core summary plus the
 // build/operate fields newer servers return (kind/state). Older servers omit
@@ -720,6 +795,18 @@ export function ChatPanel({
   // the list above, there's nothing to wait for visually.
   const [loadingConvs, setLoadingConvs] = useState(() => cachedGet<ConversationSummary[]>('conversations') === null)
   const [loadingMessages, setLoadingMessages] = useState(false)
+  // 120: per-conversation load failure (reason line) and paging window.
+  const [loadErrorByConv, setLoadErrorByConv] = useState<Record<string, string>>({})
+  const [pagingByConv, setPagingByConv] = useState<Record<string, PagingState>>({})
+  const [loadingEarlier, setLoadingEarlier] = useState(false)
+  const [earlierError, setEarlierError] = useState<string | null>(null)
+  // Only the LATEST selectConversation may flip the spinner off / jump to
+  // the bottom — a slower, superseded load must not paint over the switch.
+  const loadSeqRef = useRef(0)
+  // Set right before older rows are prepended; the layout effect below shifts
+  // scrollTop by the height they added so the viewport does not jump.
+  const prependAnchorRef = useRef<{ convId: string; height: number; at: number } | null>(null)
+  const skipAutoScrollRef = useRef(false)
   // Transient tool activity / subagent shimmer / wait countdown all live in
   // the per-conversation `turns` record above (012).
   // 069: wait countdown ticker — runs only while the ACTIVE chat has a live
@@ -1310,8 +1397,9 @@ export function ChatPanel({
     let currentMsgId = asstId
     let needsCont = false
     const resync = () => {
+      // 120: merge, don't replace — pages the user loaded earlier survive.
       api.messages(convId)
-        .then((msgs) => setConvMessages(convId, msgs.map(apiToUI)))
+        .then((msgs) => setConvMessages(convId, (prev) => mergeWindow(prev, msgs.map(apiToUI))))
         .catch(() => {})
     }
     try {
@@ -1766,7 +1854,25 @@ export function ChatPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshConversations])
 
+  // 120: after "Load earlier" prepends rows, keep the viewport on the same
+  // content: scrollTop += (new scrollHeight − old scrollHeight). Layout
+  // effects run before the passive auto-scroll effect below, which is told
+  // to sit this commit out (a prepend is not new content — no pill either).
+  useLayoutEffect(() => {
+    const a = prependAnchorRef.current
+    if (!a) return
+    prependAnchorRef.current = null
+    if (a.convId !== activeIdRef.current || Date.now() - a.at > 5_000) return
+    const el = scrollRef.current
+    if (el) el.scrollTop += el.scrollHeight - a.height
+    skipAutoScrollRef.current = true
+  }, [messages])
+
   useEffect(() => {
+    if (skipAutoScrollRef.current) {
+      skipAutoScrollRef.current = false
+      return
+    }
     if (!loadingMessages && isAtBottomRef.current) {
       scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
     } else if (!loadingMessages && !isAtBottomRef.current) {
@@ -1792,23 +1898,41 @@ export function ChatPanel({
 
   // Returns true if the conversation loaded, false if it could not be fetched
   // (e.g. 404) so callers can fall back. 007.013-D.
+  // 120 (plan 022): the load is the newest PAGE_SIZE rows with a 60 s
+  // timeout. ANY failure (network, 5xx, timeout) keeps the draft, records a
+  // per-conversation error and renders the load-error card with Retry — the
+  // old `catch { return false }` painted the empty greeting over a
+  // conversation that merely failed to load (the scanny-2 incident).
   async function selectConversation(id: string): Promise<boolean> {
     setActiveId(id)
     activeIdRef.current = id
+    const seq = ++loadSeqRef.current
     setLoadingMessages(true)
+    setLoadErrorByConv((p) => {
+      if (!(id in p)) return p
+      const next = { ...p }
+      delete next[id]
+      return next
+    })
+    setEarlierError(null)
     try { setInput(localStorage.getItem(draftKey(id)) ?? '') } catch { setInput('') }
     // 008.95: staged uploads are bound to the conversation that minted their
     // refs — they don't survive a switch.
     clearStaged()
     // 012: NO turn-state reset here — every conversation carries its own
     // turn record, so switching shows the target chat's real state.
-    let msgs
+    const ctrl = new AbortController()
+    const timer = window.setTimeout(() => ctrl.abort(), LOAD_TIMEOUT_MS)
+    let page: LoadedWindow
     try {
-      msgs = await api.messages(id)
-    } catch {
-      setLoadingMessages(false)
+      page = await raceAbort(fetchWindow(id, { limit: PAGE_SIZE, signal: ctrl.signal }), ctrl.signal)
+    } catch (e) {
+      window.clearTimeout(timer)
+      setLoadErrorByConv((p) => ({ ...p, [id]: loadErrorReason(e) }))
+      if (loadSeqRef.current === seq) setLoadingMessages(false)
       return false
     }
+    window.clearTimeout(timer)
     // 045/phase05: apply-and-clear any buffered deltas before the overwrite so
     // a stale chunk can't misroute later.
     flushDeltasNow()
@@ -1819,21 +1943,81 @@ export function ChatPanel({
     // 012: the merge now only ever sees THIS conversation's in-flight bubbles.
     setConvMessages(id, (prev) => {
       const locals = prev.filter((x) => x.id.startsWith('local-'))
-      const loaded = msgs.map(apiToUI)
+      const loaded = page.rows.map(apiToUI)
       return locals.length ? [...loaded, ...locals] : loaded
     })
+    setPagingByConv((p) => ({
+      ...p,
+      [id]: { hasMore: page.hasMore, nextBefore: page.nextBefore, total: page.total },
+    }))
     api.context(id).then(setContextStatus).catch(() => setContextStatus(null))
     await Promise.all([loadConversationApprovals(id), loadConversationSecretReqs(id)])
-    setLoadingMessages(false)
-    // Jump to bottom instantly (no visible scroll animation on load)
-    requestAnimationFrame(() => {
-      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'instant' })
-    })
+    if (loadSeqRef.current === seq) {
+      setLoadingMessages(false)
+      // Jump to bottom instantly (no visible scroll animation on load)
+      requestAnimationFrame(() => {
+        scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'instant' })
+      })
+    }
     // 028: a server-owned turn may still be running for this conversation
     // (reload mid-turn) — re-attach as a viewer instead of showing a dead chat.
     void reattachIfActive(id)
     return true
   }
+
+  // 120: page the next PAGE_SIZE older rows in front of the loaded window.
+  // The scroll anchor is measured right before the state update; the layout
+  // effect above applies the height delta so the visible rows stay put.
+  async function loadEarlier() {
+    const id = activeIdRef.current
+    if (!id || loadingEarlier) return
+    const pg = pagingByConv[id]
+    if (!pg?.hasMore || !pg.nextBefore) return
+    setLoadingEarlier(true)
+    setEarlierError(null)
+    const ctrl = new AbortController()
+    const timer = window.setTimeout(() => ctrl.abort(), LOAD_TIMEOUT_MS)
+    try {
+      const page = await raceAbort(
+        fetchWindow(id, { limit: PAGE_SIZE, before: pg.nextBefore, signal: ctrl.signal }),
+        ctrl.signal,
+      )
+      const older = page.rows.map(apiToUI)
+      const el = scrollRef.current
+      if (el && older.length) prependAnchorRef.current = { convId: id, height: el.scrollHeight, at: Date.now() }
+      setConvMessages(id, (prev) => {
+        const seen = new Set(prev.map((m) => m.id))
+        const fresh = older.filter((m) => !seen.has(m.id))
+        return fresh.length ? [...fresh, ...prev] : prev
+      })
+      setPagingByConv((p) => ({
+        ...p,
+        [id]: { hasMore: page.hasMore, nextBefore: page.nextBefore, total: page.total },
+      }))
+    } catch (e) {
+      setEarlierError(loadErrorReason(e))
+    } finally {
+      window.clearTimeout(timer)
+      setLoadingEarlier(false)
+    }
+  }
+
+  // 120: swap a truncated row for the full one (single-row endpoint).
+  const expandRow = useCallback(async (convId: string, msgId: string) => {
+    if (typeof api.message !== 'function') throw new Error('not supported by this Luna')
+    const full = await api.message(convId, msgId)
+    setConvMessages(convId, (m) =>
+      m.map((x) =>
+        x.id === msgId
+          ? { ...x, content: full.content, reasoning: full.reasoning ?? x.reasoning, truncated: false }
+          : x,
+      ),
+    )
+  }, [setConvMessages])
+  const expandCtx = useMemo(() => ({ convId: activeId, expand: expandRow }), [activeId, expandRow])
+  const loadError = loadErrorByConv[activeId ?? ''] ?? null
+  const paging = pagingByConv[activeId ?? ''] ?? NO_PAGING
+  const earlierCount = Math.max(0, paging.total - messages.filter((m) => !m.id.startsWith('local-')).length)
 
   // 005.82-fixes1: re-hydrate a conversation's approval cards on (re)load.
   // The live SSE stream only delivers events for the current session, so a
@@ -2356,9 +2540,10 @@ export function ChatPanel({
           flushLiveNow()
           setConvMessages(convId, (m) => m.map((msg) => (msg.pending ? { ...msg, pending: false } : msg)))
           if (convId) {
+            // 120: merge, don't replace — pages the user loaded earlier survive.
             api.messages(convId)
               .then((msgs) => {
-                setConvMessages(convId, msgs.map(apiToUI))
+                setConvMessages(convId, (prev) => mergeWindow(prev, msgs.map(apiToUI)))
               })
               .catch(() => {})
           }
@@ -2586,6 +2771,7 @@ export function ChatPanel({
             0.29.1: the big top spacer shrank to a hairline — messages sit
             flush under the header/notice, no dark band above the first bubble.
             013: the feedback banner moved out — it docks onto the composer. */}
+        <ExpandRowContext.Provider value={expandCtx}>
         <div ref={scrollRef} onScroll={handleScroll} className={cn('flex-1 overflow-y-auto overflow-x-hidden overscroll-contain', dense ? 'px-3 pb-3' : 'px-6 pb-6')} data-testid="chat-scroll-pane">
           <div aria-hidden className="h-2" />
           {loadingMessages && (
@@ -2594,7 +2780,25 @@ export function ChatPanel({
               Loading conversation…
             </div>
           )}
-          {!loadingMessages && messages.length === 0 && !compact && (
+          {/* 120: a failed load is an error, never an empty chat. The card
+              replaces the greeting; Retry re-runs the same load. */}
+          {!loadingMessages && loadError && (
+            <div
+              data-testid="load-error-card"
+              className="max-w-md mx-auto my-10 rounded-2xl border border-rose-500/30 bg-rose-950/30 px-5 py-4 text-sm fade-in"
+            >
+              <div className="font-medium text-ink-100">Couldn't load this conversation.</div>
+              <div data-testid="load-error-reason" className="mt-1 text-ink-400">{loadError}</div>
+              <button
+                type="button"
+                onClick={() => { if (activeId) void selectConversation(activeId) }}
+                className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-ink-900/70 px-3 py-1.5 text-[13px] font-medium text-ink-100 hover:bg-ink-800 transition-colors cursor-pointer"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+          {!loadingMessages && !loadError && messages.length === 0 && !compact && (
             <EmptyState
               name={agentName(identity)}
               emoji={identity?.emoji || '🌙'}
@@ -2603,6 +2807,28 @@ export function ChatPanel({
             />
           )}
           <div className={cn(dense ? 'space-y-3' : 'max-w-3xl mx-auto space-y-5')}>
+            {/* 120: older rows exist beyond the loaded window — page them in
+                on demand, anchored so the visible messages do not jump. */}
+            {paging.hasMore && !loadingMessages && !loadError && (
+              <div data-testid="load-earlier" className="flex flex-col items-center gap-1 py-1">
+                <button
+                  type="button"
+                  disabled={loadingEarlier}
+                  onClick={() => { void loadEarlier() }}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-ink-900/70 px-3 py-1 text-[12px] text-ink-300 hover:bg-ink-800 hover:text-ink-100 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-default"
+                >
+                  {loadingEarlier
+                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden />
+                    : <ChevronUp className="w-3.5 h-3.5" aria-hidden />}
+                  Load earlier messages{earlierCount > 0 ? ` (${earlierCount.toLocaleString()} more)` : ''}
+                </button>
+                {earlierError && (
+                  <div data-testid="load-earlier-error" className="text-[12px] text-rose-400">
+                    Couldn't load earlier messages — {earlierError}
+                  </div>
+                )}
+              </div>
+            )}
             {timeline}
             {/* 016/022: THE in-turn tool surface — a collapsed summary line
                 (loader · wrench · count · timer · chevron) that expands into
@@ -2656,6 +2882,7 @@ export function ChatPanel({
             )}
           </div>
         </div>
+        </ExpandRowContext.Provider>
 
         {/* 007.013-fix: anchor the "New messages" pill to the composer's top
             edge (bottom-full) so it always floats just above it, regardless of
@@ -3070,6 +3297,7 @@ function Bubble({ message, emoji, avatarUrl }: { message: UIMessage; emoji: stri
             </div>
           </>
         )}
+        {message.truncated && <TruncatedRowLink messageId={message.id} />}
         {message.pending && !message.content && !message.reasoning && !message.live_runs?.length && (
           <span className="text-ink-500 text-sm dots">thinking</span>
         )}
@@ -3097,6 +3325,40 @@ function Bubble({ message, emoji, avatarUrl }: { message: UIMessage; emoji: stri
         )}
       </div>
       </div>
+    </div>
+  )
+}
+
+// 120: the list view capped this row's content/reasoning at 64 KB. The link
+// fetches the untruncated row and swaps it in; a failure keeps the cut text
+// and says so inline.
+function TruncatedRowLink({ messageId }: { messageId: string }) {
+  const ctx = useContext(ExpandRowContext)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  if (!ctx?.convId) return null
+  const { convId, expand } = ctx
+  return (
+    <div data-testid="truncated-row" className="mt-1.5 text-[12px] flex items-center gap-2 flex-wrap">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => {
+          setBusy(true)
+          setErr(null)
+          expand(convId, messageId)
+            .catch((e) => setErr(e instanceof Error && e.message ? e.message : 'request failed'))
+            .finally(() => setBusy(false))
+        }}
+        className="text-ink-400 hover:text-ink-200 underline underline-offset-2 disabled:opacity-60 cursor-pointer"
+      >
+        {busy ? 'Loading full message…' : 'Show full message'}
+      </button>
+      {err && (
+        <span data-testid="truncated-row-error" className="text-rose-400">
+          Couldn't load the full message — {err}
+        </span>
+      )}
     </div>
   )
 }
@@ -5181,6 +5443,7 @@ function apiToUI(m: ApiMessage): UIMessage {
     reasoning_ms: m.reasoning_ms ?? undefined,
     error_code: m.error_code ?? undefined,
     retryable: m.retryable ?? undefined,
+    truncated: m.truncated === true ? true : undefined,
   }
 }
 
