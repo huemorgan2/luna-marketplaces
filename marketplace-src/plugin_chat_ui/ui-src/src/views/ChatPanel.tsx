@@ -493,7 +493,7 @@ const EMPTY_TURN: TurnUI = {
 }
 const NO_MESSAGES: UIMessage[] = []
 
-// 120 (plan 022): GET /messages is a bounded window now — the newest PAGE_SIZE
+// 120 (plan 027): GET /messages is a bounded window now — the newest PAGE_SIZE
 // rows plus paging headers. The load itself is capped at LOAD_TIMEOUT_MS so a
 // spinner can never outlive the proxy's edge timeout, and every failure is
 // rendered (card + Retry) instead of swallowed into the empty greeting.
@@ -546,23 +546,34 @@ export function loadErrorReason(e: unknown): string {
 /** 120: a resync fetches the DEFAULT window only. Rows the user paged in
  *  earlier (older than the fresh window's oldest row) stay in front of it, so
  *  a finished turn never silently throws away what was loaded. Local
- *  in-flight bubbles are dropped as before — the fresh rows ARE their truth. */
+ *  in-flight bubbles are dropped as before — the fresh rows ARE their truth.
+ *  The cut is POSITIONAL when the fresh window's oldest row is already on
+ *  screen (everything before it is older by the server's (created_at, id)
+ *  order); only when it is not do we fall back to comparing timestamps — with
+ *  `<=`, since a row missing from the newest window can only be older, and
+ *  the server orders ties by id below millisecond precision. */
 export function mergeWindow(prev: UIMessage[], fresh: UIMessage[]): UIMessage[] {
   if (fresh.length === 0) return fresh
-  const oldest = Date.parse(fresh[0].created_at ?? '')
-  if (!Number.isFinite(oldest)) return fresh
   const ids = new Set(fresh.map((m) => m.id))
-  const kept = prev.filter(
-    (m) => !m.id.startsWith('local-') && !ids.has(m.id) && !!m.created_at && Date.parse(m.created_at) < oldest,
-  )
+  const idx = prev.findIndex((m) => m.id === fresh[0].id)
+  let older: UIMessage[]
+  if (idx >= 0) {
+    older = prev.slice(0, idx)
+  } else {
+    const oldest = Date.parse(fresh[0].created_at ?? '')
+    if (!Number.isFinite(oldest)) return fresh
+    older = prev.filter((m) => !!m.created_at && Date.parse(m.created_at) <= oldest)
+  }
+  const kept = older.filter((m) => !m.id.startsWith('local-') && !ids.has(m.id))
   return kept.length ? [...kept, ...fresh] : fresh
 }
 
 // 120: the bubble's "Show full message" link needs the conversation id and a
-// way to swap the truncated row for the full one; provided by ChatPanel.
+// way to swap the truncated row for the full one; provided by ChatPanel. The
+// full row is also returned so Copy on a truncated bubble copies ALL of it.
 const ExpandRowContext = createContext<{
   convId: string | null
-  expand: (convId: string, msgId: string) => Promise<void>
+  expand: (convId: string, msgId: string) => Promise<ApiMessage>
 } | null>(null)
 
 // 089: a conversation row as this UI handles it — the core summary plus the
@@ -798,8 +809,10 @@ export function ChatPanel({
   // 120: per-conversation load failure (reason line) and paging window.
   const [loadErrorByConv, setLoadErrorByConv] = useState<Record<string, string>>({})
   const [pagingByConv, setPagingByConv] = useState<Record<string, PagingState>>({})
-  const [loadingEarlier, setLoadingEarlier] = useState(false)
-  const [earlierError, setEarlierError] = useState<string | null>(null)
+  // Keyed by conversation as well (012): a page in flight for chat A must
+  // neither disable B's "Load earlier" nor paint A's failure under it.
+  const [loadingEarlierByConv, setLoadingEarlierByConv] = useState<Record<string, boolean>>({})
+  const [earlierErrorByConv, setEarlierErrorByConv] = useState<Record<string, string>>({})
   // Only the LATEST selectConversation may flip the spinner off / jump to
   // the bottom — a slower, superseded load must not paint over the switch.
   const loadSeqRef = useRef(0)
@@ -1896,13 +1909,15 @@ export function ChatPanel({
     return () => window.removeEventListener('message', onEmbedHeight)
   }, [])
 
-  // Returns true if the conversation loaded, false if it could not be fetched
-  // (e.g. 404) so callers can fall back. 007.013-D.
-  // 120 (plan 022): the load is the newest PAGE_SIZE rows with a 60 s
-  // timeout. ANY failure (network, 5xx, timeout) keeps the draft, records a
-  // per-conversation error and renders the load-error card with Retry — the
-  // old `catch { return false }` painted the empty greeting over a
-  // conversation that merely failed to load (the scanny-2 incident).
+  // Returns false ONLY when the conversation does not exist (404) so callers
+  // can fall back to another one. 007.013-D.
+  // 120 (plan 027): the load is the newest PAGE_SIZE rows with a 60 s
+  // timeout. ANY other failure (network, 5xx, timeout) keeps the draft,
+  // records a per-conversation error, renders the load-error card with Retry
+  // and returns TRUE — the conversation exists, it merely failed to load, and
+  // the deep-link fallback must not replace the card with c[0]'s timeline (the
+  // old `catch { return false }` painted the empty greeting over exactly such
+  // a failure — the scanny-2 incident).
   async function selectConversation(id: string): Promise<boolean> {
     setActiveId(id)
     activeIdRef.current = id
@@ -1914,7 +1929,12 @@ export function ChatPanel({
       delete next[id]
       return next
     })
-    setEarlierError(null)
+    setEarlierErrorByConv((p) => {
+      if (!(id in p)) return p
+      const next = { ...p }
+      delete next[id]
+      return next
+    })
     try { setInput(localStorage.getItem(draftKey(id)) ?? '') } catch { setInput('') }
     // 008.95: staged uploads are bound to the conversation that minted their
     // refs — they don't survive a switch.
@@ -1928,9 +1948,14 @@ export function ChatPanel({
       page = await raceAbort(fetchWindow(id, { limit: PAGE_SIZE, signal: ctrl.signal }), ctrl.signal)
     } catch (e) {
       window.clearTimeout(timer)
-      setLoadErrorByConv((p) => ({ ...p, [id]: loadErrorReason(e) }))
-      if (loadSeqRef.current === seq) setLoadingMessages(false)
-      return false
+      // A superseded load (a newer selectConversation ran since) reports to
+      // nobody: its conversation was either re-fetched or left, and painting
+      // its failure over a since-loaded timeline would be a lie.
+      if (loadSeqRef.current === seq) {
+        setLoadErrorByConv((p) => ({ ...p, [id]: loadErrorReason(e) }))
+        setLoadingMessages(false)
+      }
+      return (e as { httpStatus?: number } | null)?.httpStatus !== 404
     }
     window.clearTimeout(timer)
     // 045/phase05: apply-and-clear any buffered deltas before the overwrite so
@@ -1970,11 +1995,16 @@ export function ChatPanel({
   // effect above applies the height delta so the visible rows stay put.
   async function loadEarlier() {
     const id = activeIdRef.current
-    if (!id || loadingEarlier) return
+    if (!id || loadingEarlierByConv[id]) return
     const pg = pagingByConv[id]
     if (!pg?.hasMore || !pg.nextBefore) return
-    setLoadingEarlier(true)
-    setEarlierError(null)
+    setLoadingEarlierByConv((p) => ({ ...p, [id]: true }))
+    setEarlierErrorByConv((p) => {
+      if (!(id in p)) return p
+      const next = { ...p }
+      delete next[id]
+      return next
+    })
     const ctrl = new AbortController()
     const timer = window.setTimeout(() => ctrl.abort(), LOAD_TIMEOUT_MS)
     try {
@@ -1995,10 +2025,15 @@ export function ChatPanel({
         [id]: { hasMore: page.hasMore, nextBefore: page.nextBefore, total: page.total },
       }))
     } catch (e) {
-      setEarlierError(loadErrorReason(e))
+      setEarlierErrorByConv((p) => ({ ...p, [id]: loadErrorReason(e) }))
     } finally {
       window.clearTimeout(timer)
-      setLoadingEarlier(false)
+      setLoadingEarlierByConv((p) => {
+        if (!p[id]) return p
+        const next = { ...p }
+        delete next[id]
+        return next
+      })
     }
   }
 
@@ -2013,10 +2048,13 @@ export function ChatPanel({
           : x,
       ),
     )
+    return full
   }, [setConvMessages])
   const expandCtx = useMemo(() => ({ convId: activeId, expand: expandRow }), [activeId, expandRow])
   const loadError = loadErrorByConv[activeId ?? ''] ?? null
   const paging = pagingByConv[activeId ?? ''] ?? NO_PAGING
+  const loadingEarlier = !!loadingEarlierByConv[activeId ?? '']
+  const earlierError = earlierErrorByConv[activeId ?? ''] ?? null
   const earlierCount = Math.max(0, paging.total - messages.filter((m) => !m.id.startsWith('local-')).length)
 
   // 005.82-fixes1: re-hydrate a conversation's approval cards on (re)load.
@@ -2772,7 +2810,10 @@ export function ChatPanel({
             flush under the header/notice, no dark band above the first bubble.
             013: the feedback banner moved out — it docks onto the composer. */}
         <ExpandRowContext.Provider value={expandCtx}>
-        <div ref={scrollRef} onScroll={handleScroll} className={cn('flex-1 overflow-y-auto overflow-x-hidden overscroll-contain', dense ? 'px-3 pb-3' : 'px-6 pb-6')} data-testid="chat-scroll-pane">
+        {/* 120: [overflow-anchor:none] — the "Load earlier" prepend keeps the
+              viewport in place itself (layout effect); the browser's own scroll
+              anchoring would add the same shift a second time. */}
+        <div ref={scrollRef} onScroll={handleScroll} className={cn('flex-1 overflow-y-auto overflow-x-hidden overscroll-contain [overflow-anchor:none]', dense ? 'px-3 pb-3' : 'px-6 pb-6')} data-testid="chat-scroll-pane">
           <div aria-hidden className="h-2" />
           {loadingMessages && (
             <div className="flex items-center justify-center py-12 text-ink-400 text-sm gap-2">
@@ -3123,6 +3164,10 @@ function MessageMenu({ message }: { message: UIMessage }) {
   const [open, setOpen] = useState(false)
   const [copied, setCopied] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
+  // 120: a truncated bubble copies the FULL row (single-row endpoint), not
+  // the 64 KB cut with its "… [truncated]" marker; the fetch also swaps the
+  // full text into the bubble. If it fails, the cut text is what we have.
+  const expandCtx = useContext(ExpandRowContext)
   useEffect(() => {
     if (!open) return
     const onDown = (e: MouseEvent) => {
@@ -3132,7 +3177,12 @@ function MessageMenu({ message }: { message: UIMessage }) {
     return () => document.removeEventListener('mousedown', onDown)
   }, [open])
   async function doCopy() {
-    const text = message.content || ''
+    let text = message.content || ''
+    if (message.truncated && expandCtx?.convId) {
+      try {
+        text = (await expandCtx.expand(expandCtx.convId, message.id)).content || text
+      } catch { /* keep the cut text */ }
+    }
     let ok = false
     try {
       await navigator.clipboard.writeText(text)
