@@ -1,0 +1,25 @@
+name = "luna-service-mobile"
+shown_name = "Luna mobile feed"
+version = "0.1.0"
+description = "Tells luna.com.ai when this Luna's chats change, so the Luna iPhone app has a live feed."
+entry = "luna_service_mobile"
+sdk_version = "0"
+category = "connectors"
+icon = "smartphone"
+tags = ["hosted", "mobile", "feed"]
+readme = """
+# luna-service-mobile
+
+Hosted Lunas only. Listens to Luna's own events (a message arrives, a reply finishes, Luna starts or
+stops working, an approval is requested or decided) and forwards a small summary of each to the
+luna.com.ai control plane: conversation id, title, time, role, and a short preview. The Luna iPhone
+app builds its chat feed, unread counts and "working…" state from these.
+
+It uses the machine's existing `LUNA_GATEWAY_URL` / `LUNA_GATEWAY_TOKEN`. Without them (self-hosted
+Luna) it does nothing. No tools, routes or tables. It never sends whole messages, tool payloads or
+secrets, and previews can be turned off per Luna on luna.com.ai.
+"""
+
+[requires]
+tools = 0
+env = ["LUNA_GATEWAY_URL", "LUNA_GATEWAY_TOKEN"]
